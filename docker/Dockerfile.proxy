@@ -1,0 +1,27 @@
+
+
+FROM golang:1.18 as builder
+
+WORKDIR /workspace
+
+COPY . bytetrade.io/web3os/fs-lib
+
+
+RUN git clone https://github.com/kubernetes/code-generator.git bytetrade.io/web3os/code-generator && \ 
+    cd bytetrade.io/web3os/code-generator && git checkout -b release-1.27 && cd - 
+
+# Build
+RUN cd bytetrade.io/web3os/fs-lib && \
+        go mod tidy 
+
+RUN cd bytetrade.io/web3os/fs-lib && \ 
+    CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -a -o fsnotify-proxy k8s/cmd/fsnotify-proxy/main.go
+
+# Use distroless as minimal base image to package the manager binary
+# Refer to https://github.com/GoogleContainerTools/distroless for more details
+# FROM gcr.io/distroless/base:nonroot
+FROM gcr.io/distroless/base:debug
+WORKDIR /
+COPY --from=builder /workspace/bytetrade.io/web3os/fs-lib/fsnotify-proxy .
+
+ENTRYPOINT ["/fsnotify-proxy"]
