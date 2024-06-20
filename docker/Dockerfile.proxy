@@ -15,7 +15,7 @@ RUN cd bytetrade.io/web3os/fs-lib && \
         go mod tidy 
 
 RUN cd bytetrade.io/web3os/fs-lib && \ 
-    CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -a -o fsnotify-proxy k8s/cmd/fsnotify-proxy/main.go
+    CGO_ENABLED=1 go build -a -o fsnotify-proxy k8s/cmd/fsnotify-proxy/main.go
 
 # Use distroless as minimal base image to package the manager binary
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
