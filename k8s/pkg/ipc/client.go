@@ -94,5 +94,9 @@ func NewJFSClient(ctx context.Context, name string, readCB func(msg *ipc.Message
 }
 
 func (c *JFSClient) Write(m *ipc.Message) error {
+	if c.client == nil {
+		return errors.New("juicefs not connected")
+	}
+
 	return c.client.Write(m.MsgType, m.Data)
 }
