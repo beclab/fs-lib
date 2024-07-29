@@ -12,14 +12,12 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/smallnest/goframe"
 	"k8s.io/klog/v2"
 )
 
-// to use the jfsnotify watcher in k8s cluster
-// export POD_NAME and NAMESPACE in env
-
-type Watcher struct {
+type wInterface struct {
 	// Events sends the filesystem change events.
 	//
 	// fsnotify can send the following events; a "path" here can refer to a
@@ -67,6 +65,19 @@ type Watcher struct {
 	//  - kqueue, fen: not used.
 	Errors chan error
 
+	Add       func(path string) error
+	AddWith   func(path string, opts ...addOpt) error
+	Remove    func(path string) error
+	Close     func() error
+	WatchList func() []string
+}
+
+// to use the jfsnotify watcher in k8s cluster
+// export POD_NAME and NAMESPACE in env
+
+type Watcher struct {
+	wInterface
+
 	name     string
 	watches  []string
 	fconn    goframe.FrameConn
@@ -107,13 +118,77 @@ func init() {
 
 // NewWatcher creates a new Watcher.
 func NewWatcher(name string) (*Watcher, error) {
+	notifyType := "jfs"
+	if t := os.Getenv("FS_TYPE"); t != "" {
+		notifyType = t
+	}
+
+	switch notifyType {
+	case "jfs":
+		return newJFSWatcher(name)
+	case "fs":
+		return newFSWatcher()
+	default:
+		return nil, errors.New("unknown fs type")
+	}
+}
+
+func newFSWatcher() (*Watcher, error) {
+	fsWatcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, err
+	}
+
+	w := &Watcher{
+		wInterface: wInterface{
+			Events: make(chan Event),
+			Errors: fsWatcher.Errors,
+		},
+	}
+
+	w.ctx, w.close = context.WithCancel(context.Background())
+
+	go func() {
+		for {
+			select {
+			case <-w.ctx.Done():
+				return
+			case e := <-fsWatcher.Events:
+				newEvent := Event{
+					Name: e.Name,
+					Op:   Op(uint32(e.Op)),
+				}
+
+				w.Events <- newEvent
+			}
+		}
+
+	}()
+
+	w.Close = func() error {
+		if e := fsWatcher.Close(); e != nil {
+			return e
+		} else {
+			return w.internelClose()
+		}
+	}
+	w.Remove = func(path string) error { return fsWatcher.Remove(path) }
+	w.Add = func(path string) error { return fsWatcher.Add(path) }
+	w.AddWith = func(path string, opts ...addOpt) error { return fsWatcher.Add(path) }
+	w.WatchList = func() []string { return fsWatcher.WatchList() }
+	return w, nil
+}
+
+func newJFSWatcher(name string) (*Watcher, error) {
 	if strings.Contains(name, "/") {
 		return nil, errors.New("bad watcher name, illegal character '/'")
 	}
 
 	w := &Watcher{
-		Events:    make(chan Event),
-		Errors:    make(chan error),
+		wInterface: wInterface{
+			Events: make(chan Event),
+			Errors: make(chan error),
+		},
 		initTask:  make(chan func(), 10),
 		reconnect: make(chan int, 10),
 		sendQ:     make(chan []byte, 255),
@@ -121,6 +196,11 @@ func NewWatcher(name string) (*Watcher, error) {
 		name: fmt.Sprintf("%s/%s/%s", podName, containerName, name),
 	}
 
+	w.Close = w.internelClose
+	w.Remove = w.internelRemove
+	w.Add = w.internelAdd
+	w.AddWith = w.internelAddWith
+	w.WatchList = w.internelWatchList
 	w.ctx, w.close = context.WithCancel(context.Background())
 
 	go w.start()
@@ -322,7 +402,7 @@ func (w *Watcher) send(watchType int, watches []string) error {
 }
 
 // Close removes all watches and closes the events channel.
-func (w *Watcher) Close() error {
+func (w *Watcher) internelClose() error {
 	w.close()
 	return nil
 }
@@ -371,7 +451,7 @@ func (w *Watcher) clear() {
 //
 // Instead, watch the parent directory and use Event.Name to filter out files
 // you're not interested in. There is an example of this in [cmd/fsnotify/file.go].
-func (w *Watcher) Add(name string) error { return w.AddWith(name) }
+func (w *Watcher) internelAdd(name string) error { return w.internelAddWith(name) }
 
 // AddWith is like [Add], but allows adding options. When using Add() the
 // defaults described below are used.
@@ -380,7 +460,7 @@ func (w *Watcher) Add(name string) error { return w.AddWith(name) }
 //
 //   - [WithBufferSize] sets the buffer size for the Windows backend; no-op on
 //     other platforms. The default is 64K (65536 bytes).
-func (w *Watcher) AddWith(name string, opts ...addOpt) error {
+func (w *Watcher) internelAddWith(name string, opts ...addOpt) error {
 	err := w.sendWatch([]string{name})
 	if err != nil {
 		return err
@@ -409,7 +489,7 @@ func (w *Watcher) AddWith(name string, opts ...addOpt) error {
 // Removing a path that has not yet been added returns [ErrNonExistentWatch].
 //
 // Returns nil if [Watcher.Close] was called.
-func (w *Watcher) Remove(name string) error {
+func (w *Watcher) internelRemove(name string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -433,7 +513,7 @@ func (w *Watcher) Remove(name string) error {
 // WatchList returns all paths added with [Add] (and are not yet removed).
 //
 // Returns nil if [Watcher.Close] was called.
-func (w *Watcher) WatchList() []string {
+func (w *Watcher) internelWatchList() []string {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 
