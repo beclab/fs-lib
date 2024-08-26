@@ -68,7 +68,7 @@ func (a *App) readEvent(msg *ipc.Message) {
 		return
 	}
 
-	klog.Info("publish event, ", string(data))
+	klog.V(8).Info("publish event, ", string(data))
 	a.producer.Pub(producer.ChannelName, string(data))
 }
 
@@ -160,7 +160,7 @@ func (a *App) SyncWatches(action fswatchers.Action, obj interface{}) error {
 		}
 
 		if len(addPaths) > 0 {
-			klog.Info("add new watch, ", addPaths)
+			klog.V(8).Info("add new watch, ", addPaths)
 			err = a.ipcClient.Write(&ipc.Message{MsgType: jfsnotify.MSG_WATCH, Data: addPaths})
 			if err != nil {
 				klog.Error("send add watches error, ", err)
@@ -181,7 +181,7 @@ func (a *App) SyncWatches(action fswatchers.Action, obj interface{}) error {
 		}
 
 		if len(delPaths) > 0 {
-			klog.Info("del watch, ", delPaths)
+			klog.V(8).Info("del watch, ", delPaths)
 			err = a.ipcClient.Write(&ipc.Message{MsgType: jfsnotify.MSG_UNWATCH, Data: delPaths})
 			if err != nil {
 				klog.Error("send del watches error, ", err)

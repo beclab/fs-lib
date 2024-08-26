@@ -34,7 +34,7 @@ func NewJFSClient(ctx context.Context, name string, readCB func(msg *ipc.Message
 				if err != nil {
 					return nil, err
 				}
-				klog.Info("read ", m.Status, ", type ", m.MsgType)
+				klog.V(8).Info("read ", m.Status, ", type ", m.MsgType)
 
 				if m.MsgType == -2 {
 					return nil, errors.New("connect error")
