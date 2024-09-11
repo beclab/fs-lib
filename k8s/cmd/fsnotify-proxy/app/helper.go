@@ -44,7 +44,7 @@ type watcher struct {
 	Remove         func()
 	CRName         string
 	CRNamespace    string
-	delayWriteMsgs map[string]*jfsnotify.Event
+	delayWriteMsgs map[string]time.Time
 }
 
 func NewWatcher(c *multicast.Client) *watcher {
@@ -82,25 +82,11 @@ func (w *watcher) WriteMsg(msg string) error {
 			if func() bool {
 				w.mu.Lock()
 				defer w.mu.Unlock()
-				if _, ok := w.delayWriteMsgs[event.Name]; ok {
-					return false
-				}
-
-				w.delayWriteMsgs[event.Name] = event
-				return true
+				_, ok := w.delayWriteMsgs[event.Name]
+				w.delayWriteMsgs[event.Name] = time.Now()
+				return !ok
 			}() {
-				deley := time.NewTimer(time.Second)
-				localEvent := *event
-				go func() {
-					<-deley.C
-					err := sendEvent(&localEvent)
-					if err != nil {
-						klog.Error("send write event error, ", err, ", ", localEvent.Name)
-					}
-					w.mu.Lock()
-					defer w.mu.Unlock()
-					delete(w.delayWriteMsgs, localEvent.Name)
-				}()
+				w.send(*event, sendEvent)
 			}
 
 		default:
@@ -109,6 +95,25 @@ func (w *watcher) WriteMsg(msg string) error {
 	}
 
 	return nil
+}
+
+func (w *watcher) send(localEvent jfsnotify.Event, sendEvent func(e *jfsnotify.Event) error) {
+	deley := time.NewTimer(time.Second)
+	go func() {
+		<-deley.C
+		if t, ok := w.delayWriteMsgs[localEvent.Name]; ok && time.Since(t) < time.Second {
+			w.send(localEvent, sendEvent)
+			return
+		}
+		err := sendEvent(&localEvent)
+		if err != nil {
+			klog.Error("send write event error, ", err, ", ", localEvent.Name)
+		}
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		delete(w.delayWriteMsgs, localEvent.Name)
+	}()
+
 }
 
 func (w *watcher) Close() {
