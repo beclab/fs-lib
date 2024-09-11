@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"bytetrade.io/web3os/fs-lib/jfsnotify"
 	"bytetrade.io/web3os/fs-lib/k8s/pkg/multicast"
@@ -37,12 +38,13 @@ func (d *DebugRWMutex) RUnlock() {
 
 type watcher struct {
 	multicast.MsgWriter
-	client      *multicast.Client
-	podPathMap  map[string]string // { pathInNode: pathInPod }
-	mu          sync.RWMutex
-	Remove      func()
-	CRName      string
-	CRNamespace string
+	client         *multicast.Client
+	podPathMap     map[string]string // { pathInNode: pathInPod }
+	mu             sync.RWMutex
+	Remove         func()
+	CRName         string
+	CRNamespace    string
+	delayWriteMsgs map[string]*jfsnotify.Event
 }
 
 func NewWatcher(c *multicast.Client) *watcher {
@@ -58,7 +60,7 @@ func (w *watcher) WriteMsg(msg string) error {
 		return err
 	}
 
-	for _, event := range events {
+	sendEvent := func(event *jfsnotify.Event) error {
 		klog.Info("translate msg to watcher, ", event)
 		data, err := w.translateEventNameInCluster(event)
 		if err != nil {
@@ -69,6 +71,40 @@ func (w *watcher) WriteMsg(msg string) error {
 		err = w.client.SendBytes(data)
 		if err != nil {
 			return err
+		}
+
+		return nil
+	}
+
+	for _, event := range events {
+		switch event.Op {
+		case jfsnotify.Write:
+			if func() bool {
+				w.mu.Lock()
+				defer w.mu.Unlock()
+				if _, ok := w.delayWriteMsgs[event.Name]; ok {
+					return false
+				}
+
+				w.delayWriteMsgs[event.Name] = event
+				return true
+			}() {
+				deley := time.NewTimer(time.Second)
+				localEvent := *event
+				go func() {
+					<-deley.C
+					err := sendEvent(&localEvent)
+					if err != nil {
+						klog.Error("send write event error, ", err, ", ", localEvent.Name)
+					}
+					w.mu.Lock()
+					defer w.mu.Unlock()
+					delete(w.delayWriteMsgs, localEvent.Name)
+				}()
+			}
+
+		default:
+			return sendEvent(event)
 		}
 	}
 
