@@ -49,8 +49,9 @@ type watcher struct {
 
 func NewWatcher(c *multicast.Client) *watcher {
 	return &watcher{
-		client:     c,
-		podPathMap: make(map[string]string),
+		client:         c,
+		podPathMap:     make(map[string]string),
+		delayWriteMsgs: make(map[string]time.Time),
 	}
 }
 
