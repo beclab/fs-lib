@@ -85,15 +85,25 @@ func (s *Server) removeChannel(c *Client, err error) {
 }
 
 func (s *Server) multicastMsg(msg string) {
+	var funcs []func()
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 
 	for _, c := range s.watchClients {
 		if writer, ok := c.Helper.(MsgWriter); ok {
-			err := writer.WriteMsg(msg)
-			if err != nil {
-				klog.Error("send msg to client error, ", err)
-			}
+
+			funcs = append(funcs, func() {
+				err := writer.WriteMsg(msg)
+				if err != nil {
+					klog.Error("send msg to client error, ", err)
+				}
+			})
 		}
 	}
+
+	s.mu.RUnlock()
+
+	for _, f := range funcs {
+		f()
+	}
+
 }
