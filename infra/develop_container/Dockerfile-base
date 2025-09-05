@@ -1,0 +1,7 @@
+FROM beclab/zzcommondevelop:latest
+
+
+
+
+RUN mkdir -p /opt/fs-lib 
+ENTRYPOINT ["tail", "-f", "/dev/null"]
