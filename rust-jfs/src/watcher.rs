@@ -471,6 +471,9 @@ mod tests {
 
         let msg = package_msg(MessageType::Clear, &data);
 
+        // Create /data directory if it doesn't exist
+        std::fs::create_dir_all("/data").expect("Failed to create /data directory");
+
         // Write msg to binary file
         std::fs::write("/data/rust.data", &msg).expect("Failed to write data to file");
     }
