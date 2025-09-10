@@ -456,3 +456,22 @@ impl JFSWatcher {
         self.errors_rx.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_package_msg() {
+        let mut data = vec![0u8; 255];
+        let clear_name = format!("{}/{}", "search3monitor-q7qmz", "search3monitor");
+        let name_bytes = clear_name.as_bytes();
+        let copy_len = std::cmp::min(name_bytes.len(), 255);
+        data[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
+
+        let msg = package_msg(MessageType::Clear, &data);
+
+        // Write msg to binary file
+        std::fs::write("/data/rust.data", &msg).expect("Failed to write data to file");
+    }
+}
