@@ -21,3 +21,8 @@ async-trait = "0.1"
 crossbeam-channel = "0.5"
 ipc-channel = "0.18"
 url = "2.4"
+chrono = "0.4.42"
+
+[[bin]]
+name="rustexample"
+path="examples/basic_usage.rs"

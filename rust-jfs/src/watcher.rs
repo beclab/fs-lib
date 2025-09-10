@@ -79,6 +79,7 @@ pub struct JFSWatcher {
 impl JFSWatcher {
     /// Create a new JFS watcher
     pub async fn new(name: &str) -> JFSResult<Self> {
+        log::info!("Creating new JFS watcher for {}", &name);
         Self::with_config(name, JFSConfig::default()).await
     }
 
@@ -114,6 +115,7 @@ impl JFSWatcher {
             reconnect_rx,
         };
 
+        log::info!("Starting connection manager for {}", &name);
         // Start the connection manager
         watcher.start_connection_manager();
 
@@ -121,7 +123,8 @@ impl JFSWatcher {
     }
 
     /// Start the connection manager task
-    fn start_connection_manager(&self) {
+    pub fn start_connection_manager(&self) {
+        log::info!("11111111111111111111111111111");
         let config = self.config.clone();
         let name = self.name.clone();
         let watches = Arc::clone(&self.watches);
@@ -131,11 +134,13 @@ impl JFSWatcher {
         let shutdown_rx = self.shutdown_rx.clone();
         let reconnect_rx = self.reconnect_rx.clone();
         let reconnect_tx = self.reconnect_tx.clone();
-
+        log::info!("22222222222222222222222222222");
         tokio::spawn(async move {
             let reconnect_rx = reconnect_rx;
 
+            log::info!("33333333333333333333333333333");
             loop {
+                /**
                 tokio::select! {
                     _ = async { shutdown_rx.recv() } => {
                         log::info!("Connection manager shutting down");
@@ -145,6 +150,10 @@ impl JFSWatcher {
                         log::info!("Reconnection requested");
                     }
                 }
+                */
+
+                log::info!("44444444444444444444444444444");
+                log::info!("Trying to connect to {}", &config.server_addr);
 
                 // Try to connect
                 match Self::connect_to_server(&config, &name).await {
