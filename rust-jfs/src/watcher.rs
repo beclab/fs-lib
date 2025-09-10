@@ -1,6 +1,6 @@
 use crate::errors::{JFSError, JFSResult};
 use crate::event::Event;
-use crate::ipc::{IpcConnection, JFSConnection, TcpConnection};
+use crate::ipc::{FrameConnection, FrameConnectionWrapper, IpcConnection, TcpConnection};
 use crate::utils::{
     get_env_var, package_msg, parse_dial_target, unpack_events, unpack_msg, MessageType,
 };
@@ -69,7 +69,7 @@ pub struct JFSWatcher {
     events_rx: Receiver<Event>,
     errors_tx: Sender<JFSError>,
     errors_rx: Receiver<JFSError>,
-    connection: Arc<Mutex<Option<Box<dyn JFSConnection>>>>,
+    connection: Arc<Mutex<Option<Box<dyn FrameConnection>>>>,
     shutdown_tx: Sender<()>,
     shutdown_rx: Receiver<()>,
     reconnect_tx: Sender<()>,
@@ -131,7 +131,7 @@ impl JFSWatcher {
         let connection = Arc::clone(&self.connection);
         let events_tx = self.events_tx.clone();
         let errors_tx = self.errors_tx.clone();
-        let shutdown_rx = self.shutdown_rx.clone();
+        let _shutdown_rx = self.shutdown_rx.clone();
         let reconnect_rx = self.reconnect_rx.clone();
         let reconnect_tx = self.reconnect_tx.clone();
         log::info!("22222222222222222222222222222");
@@ -140,17 +140,16 @@ impl JFSWatcher {
 
             log::info!("33333333333333333333333333333");
             loop {
-                /**
-                tokio::select! {
-                    _ = async { shutdown_rx.recv() } => {
-                        log::info!("Connection manager shutting down");
-                        break;
-                    }
-                    _ = async { reconnect_rx.recv() } => {
-                        log::info!("Reconnection requested");
-                    }
-                }
-                */
+                // TODO: Implement proper shutdown handling
+                // tokio::select! {
+                //     _ = async { shutdown_rx.recv() } => {
+                //         log::info!("Connection manager shutting down");
+                //         break;
+                //     }
+                //     _ = async { reconnect_rx.recv() } => {
+                //         log::info!("Reconnection requested");
+                //     }
+                // }
 
                 log::info!("44444444444444444444444444444");
                 log::info!("Trying to connect to {}", &config.server_addr);
@@ -205,17 +204,19 @@ impl JFSWatcher {
     async fn connect_to_server(
         config: &JFSConfig,
         _name: &str,
-    ) -> JFSResult<Box<dyn JFSConnection>> {
+    ) -> JFSResult<Box<dyn FrameConnection>> {
         let (protocol, addr) = parse_dial_target(&config.server_addr)?;
 
         match protocol.as_str() {
             "ipc" => {
                 let conn = IpcConnection::connect(&addr).await?;
-                Ok(Box::new(conn))
+                let frame_conn = FrameConnectionWrapper::new(conn);
+                Ok(Box::new(frame_conn))
             }
             "tcp" | "unix" => {
                 let conn = TcpConnection::connect(&addr).await?;
-                Ok(Box::new(conn))
+                let frame_conn = FrameConnectionWrapper::new(conn);
+                Ok(Box::new(frame_conn))
             }
             _ => Err(JFSError::ConnectionError(format!(
                 "Unsupported protocol: {}",
@@ -226,7 +227,7 @@ impl JFSWatcher {
 
     /// Send clear signal to server
     async fn send_clear_signal(
-        connection: &Arc<Mutex<Option<Box<dyn JFSConnection>>>>,
+        connection: &Arc<Mutex<Option<Box<dyn FrameConnection>>>>,
         name: &str,
         config: &JFSConfig,
     ) -> JFSResult<()> {
@@ -240,8 +241,7 @@ impl JFSWatcher {
 
         let mut conn_guard = connection.lock().await;
         if let Some(conn) = conn_guard.as_mut() {
-            conn.write(&msg).await.map_err(|e| JFSError::IoError(e))?;
-            conn.flush().await.map_err(|e| JFSError::IoError(e))?;
+            conn.write_frame(&msg).await?;
         }
 
         Ok(())
@@ -249,7 +249,7 @@ impl JFSWatcher {
 
     /// Resend all watches to server
     async fn resend_watches(
-        connection: &Arc<Mutex<Option<Box<dyn JFSConnection>>>>,
+        connection: &Arc<Mutex<Option<Box<dyn FrameConnection>>>>,
         watches: &Arc<RwLock<HashSet<String>>>,
         name: &str,
         config: &JFSConfig,
@@ -271,7 +271,7 @@ impl JFSWatcher {
 
     /// Send watch/unwatch message to server
     async fn send_watch_message(
-        connection: &Arc<Mutex<Option<Box<dyn JFSConnection>>>>,
+        connection: &Arc<Mutex<Option<Box<dyn FrameConnection>>>>,
         watches: &[String],
         name: &str,
         config: &JFSConfig,
@@ -300,8 +300,7 @@ impl JFSWatcher {
 
         let mut conn_guard = connection.lock().await;
         if let Some(conn) = conn_guard.as_mut() {
-            conn.write(&msg).await.map_err(|e| JFSError::IoError(e))?;
-            conn.flush().await.map_err(|e| JFSError::IoError(e))?;
+            conn.write_frame(&msg).await?;
         }
 
         Ok(())
@@ -309,39 +308,32 @@ impl JFSWatcher {
 
     /// Start reading from connection
     fn start_reader(
-        connection: &Arc<Mutex<Option<Box<dyn JFSConnection>>>>,
+        connection: &Arc<Mutex<Option<Box<dyn FrameConnection>>>>,
         events_tx: &Sender<Event>,
         errors_tx: &Sender<JFSError>,
         reconnect_tx: &Sender<()>,
     ) {
-        let connection = Arc::clone(connection);
+        let connection: Arc<Mutex<Option<Box<dyn FrameConnection>>>> = Arc::clone(connection);
         let events_tx = events_tx.clone();
         let errors_tx = errors_tx.clone();
         let reconnect_tx = reconnect_tx.clone();
 
         tokio::spawn(async move {
-            let mut buffer = vec![0u8; 4096];
-
             loop {
                 let mut conn_guard = connection.lock().await;
                 if let Some(conn) = conn_guard.as_mut() {
-                    match conn.read(&mut buffer).await {
-                        Ok(0) => {
-                            log::info!("Connection closed by server");
-                            let _ = reconnect_tx.try_send(());
-                            break;
-                        }
-                        Ok(n) => {
-                            // Process the received data
+                    match conn.read_frame().await {
+                        Ok(frame_data) => {
+                            // Process the received frame data
                             if let Err(e) =
-                                Self::process_received_data(&buffer[..n], &events_tx, &errors_tx)
+                                Self::process_received_data(&frame_data, &events_tx, &errors_tx)
                             {
                                 let _ = errors_tx.try_send(e);
                             }
                         }
                         Err(e) => {
-                            log::error!("Read error: {}", e);
-                            let _ = errors_tx.try_send(JFSError::IoError(e));
+                            log::error!("Read frame error: {}", e);
+                            let _ = errors_tx.try_send(e);
                             let _ = reconnect_tx.try_send(());
                             break;
                         }
@@ -460,6 +452,7 @@ impl JFSWatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::{FrameConnectionWrapper, TcpConnection};
 
     #[test]
     fn test_package_msg() {

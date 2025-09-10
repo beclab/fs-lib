@@ -22,7 +22,7 @@ func TestPackageMsg(t *testing.T) {
 
 // TestCompareBinaryFiles 测试比较两个二进制文件的内容是否相同
 func TestCompareBinaryFiles(t *testing.T) {
-
+	// go test -v -run TestCompareBinaryFiles
 	// 测试用例：比较两个相同的文件
 	file1 := "/data/rust.data"
 	file2 := "/data/golang.data" // 使用同一个文件进行测试

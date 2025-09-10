@@ -3,6 +3,8 @@ use std::env;
 use std::time::Duration;
 use tokio::time::sleep;
 
+// ps aux | grep rustexample | grep -v grep
+// ./upload_to_mo.sh /var/wangzhong/fs-lib/rust-jfs/target/debug/rustexample
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
@@ -17,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create a new JFS watcher
-    let watcher = JFSWatcher::new("example_watcher").await?;
+    let watcher = JFSWatcher::new("mywatcher").await?;
     // watcher.start_connection_manager();
 
     // Add paths from command line arguments

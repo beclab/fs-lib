@@ -13,6 +13,14 @@ pub trait JFSConnection: Send + Sync {
     async fn shutdown(&mut self) -> io::Result<()>;
 }
 
+/// Trait for frame-based connections that match Go's goframe protocol
+#[async_trait::async_trait]
+pub trait FrameConnection: Send + Sync {
+    async fn read_frame(&mut self) -> crate::errors::JFSResult<Bytes>;
+    async fn write_frame(&mut self, data: &[u8]) -> crate::errors::JFSResult<()>;
+    async fn shutdown(&mut self) -> crate::errors::JFSResult<()>;
+}
+
 /// TCP connection implementation
 pub struct TcpConnection {
     stream: AsyncTcpStream,
@@ -81,25 +89,43 @@ impl JFSConnection for IpcConnection {
     }
 }
 
-/// Frame-based connection wrapper
-pub struct FrameConnection<C: JFSConnection> {
+/// Frame-based connection wrapper that matches Go's goframe configuration
+///
+/// Go configuration:
+/// - ByteOrder: binary.BigEndian
+/// - LengthFieldLength: 4
+/// - LengthAdjustment: 0
+/// - LengthIncludesLengthFieldLength: false
+/// - LengthFieldOffset: 0
+/// - InitialBytesToStrip: 4
+pub struct FrameConnectionWrapper<C: JFSConnection> {
     connection: C,
     read_buffer: BytesMut,
 }
 
-impl<C: JFSConnection> FrameConnection<C> {
+impl<C: JFSConnection> FrameConnectionWrapper<C> {
     pub fn new(connection: C) -> Self {
-        FrameConnection {
+        FrameConnectionWrapper {
             connection,
             read_buffer: BytesMut::new(),
         }
     }
+}
 
-    /// Read a complete frame
-    pub async fn read_frame(&mut self) -> JFSResult<Bytes> {
+#[async_trait::async_trait]
+impl<C: JFSConnection> FrameConnection for FrameConnectionWrapper<C> {
+    /// Read a complete frame following Go's goframe protocol
+    ///
+    /// Protocol format:
+    /// [4 bytes length][data...]
+    /// - Length field is in BigEndian format
+    /// - Length field does NOT include its own 4 bytes
+    /// - We strip the 4-byte length field when returning data
+    async fn read_frame(&mut self) -> crate::errors::JFSResult<Bytes> {
         loop {
             // Try to read a complete frame from buffer
             if self.read_buffer.len() >= 4 {
+                // Read length field (4 bytes, BigEndian)
                 let frame_length = u32::from_be_bytes([
                     self.read_buffer[0],
                     self.read_buffer[1],
@@ -107,47 +133,68 @@ impl<C: JFSConnection> FrameConnection<C> {
                     self.read_buffer[3],
                 ]) as usize;
 
+                // Check if we have the complete frame (4 bytes length + data)
                 if self.read_buffer.len() >= 4 + frame_length {
-                    let frame = self.read_buffer.split_to(4 + frame_length);
-                    return Ok(frame.freeze());
+                    // Split off the complete frame
+                    let mut full_frame = self.read_buffer.split_to(4 + frame_length);
+                    // Return only the data part (strip the 4-byte length field)
+                    let data_part = full_frame.split_off(4);
+                    return Ok(data_part.freeze());
                 }
             }
 
-            // Read more data
+            // Read more data from connection
             let mut buf = [0u8; 4096];
             let n = self
                 .connection
                 .read(&mut buf)
                 .await
-                .map_err(|e| JFSError::IoError(e))?;
+                .map_err(|e| crate::errors::JFSError::IoError(e))?;
 
             if n == 0 {
-                return Err(JFSError::ConnectionError("Connection closed".to_string()));
+                return Err(crate::errors::JFSError::ConnectionError(
+                    "Connection closed".to_string(),
+                ));
             }
 
             self.read_buffer.put_slice(&buf[..n]);
         }
     }
 
-    /// Write a complete frame
-    pub async fn write_frame(&mut self, data: &[u8]) -> JFSResult<()> {
+    /// Write a complete frame following Go's goframe protocol
+    ///
+    /// Protocol format:
+    /// [4 bytes length][data...]
+    /// - Length field is in BigEndian format
+    /// - Length field contains only the data length (not including the 4-byte length field)
+    async fn write_frame(&mut self, data: &[u8]) -> crate::errors::JFSResult<()> {
+        // Create frame with length prefix
+        let mut frame = BytesMut::with_capacity(4 + data.len());
+
+        // Add 4-byte length field (BigEndian, data length only)
+        frame.put_u32(data.len() as u32);
+
+        // Add data
+        frame.put_slice(data);
+
+        // Write the complete frame
         self.connection
-            .write(data)
+            .write(&frame)
             .await
-            .map_err(|e| JFSError::IoError(e))?;
+            .map_err(|e| crate::errors::JFSError::IoError(e))?;
         self.connection
             .flush()
             .await
-            .map_err(|e| JFSError::IoError(e))?;
+            .map_err(|e| crate::errors::JFSError::IoError(e))?;
         Ok(())
     }
 
     /// Shutdown the connection
-    pub async fn shutdown(&mut self) -> JFSResult<()> {
+    async fn shutdown(&mut self) -> crate::errors::JFSResult<()> {
         self.connection
             .shutdown()
             .await
-            .map_err(|e| JFSError::IoError(e))?;
+            .map_err(|e| crate::errors::JFSError::IoError(e))?;
         Ok(())
     }
 }
