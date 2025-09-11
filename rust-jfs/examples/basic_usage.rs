@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Get the event and error receivers
     let events_rx = watcher.events_receiver();
-    let errors_rx = watcher.errors_receiver();
+    // let errors_rx = watcher.errors_receiver();
 
     log::info!("JFS Watcher started. Watching for file system events...");
     log::info!("Watching paths: {:?}", &args[1..]);
@@ -55,14 +55,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if event.has(Op::RENAME) {
                 log::info!("  -> File renamed: {}", event.name);
             }
-        }
-    });
-
-    // Spawn a task to handle errors
-    let errors_rx_clone = errors_rx.clone();
-    tokio::spawn(async move {
-        while let Ok(error) = errors_rx_clone.recv() {
-            log::error!("Watcher error: {}", error);
         }
     });
 

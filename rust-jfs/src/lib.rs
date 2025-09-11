@@ -1,7 +1,6 @@
 pub mod common;
 pub mod errors;
 pub mod event;
-pub mod ipc;
 pub mod utils;
 pub mod watcher;
 
