@@ -6,9 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use anyhow::Result;
 
 /// 读取长度前缀的数据帧
-fn read_length_prefixed_frame(stream: &mut TcpStream) -> Result<Vec<u8>, std::io::Error> {
+fn read_length_prefixed_frame(stream: &mut TcpStream) -> Result<Vec<u8>> {
     // 先读取4字节的长度字段（大端序）
     let length = stream.read_u32::<BigEndian>()? as usize;
     
@@ -20,7 +21,7 @@ fn read_length_prefixed_frame(stream: &mut TcpStream) -> Result<Vec<u8>, std::io
 }
 
 /// 写入长度前缀的数据帧
-fn write_length_prefixed_frame(stream: &mut TcpStream, data: &[u8]) -> Result<(), std::io::Error> {
+fn write_length_prefixed_frame(stream: &mut TcpStream, data: &[u8]) -> Result<()> {
     // 先写入4字节的长度字段（大端序，不包含长度字段本身）
     stream.write_u32::<BigEndian>(data.len() as u32)?;
     
@@ -135,7 +136,7 @@ async fn main() {
 async fn connect_and_run(
     write_rx: Receiver<Vec<u8>>,
     read_tx: Sender<Vec<u8>>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<()> {
     let addr = "127.0.0.1:8080";
     log::info!("Connecting to {}...", addr);
 
@@ -161,7 +162,9 @@ async fn connect_and_run(
                     }
                 }
                 Err(e) => {
-                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    if e.downcast_ref::<std::io::Error>()
+                        .map(|io_err| io_err.kind() == std::io::ErrorKind::UnexpectedEof)
+                        .unwrap_or(false) {
                         log::info!("Server closed connection");
                     } else {
                         log::error!("Read error: {}", e);
