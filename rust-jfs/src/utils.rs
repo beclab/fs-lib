@@ -1,7 +1,22 @@
 use crate::errors::{JFSError, JFSResult};
 use crate::event::{Event, Op};
+use crate::watcher::{JFSConfig, Watcher};
+use crate::JFSWatcher;
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use bytes::{BufMut, Bytes, BytesMut};
+use std::collections::HashSet;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+
 use url::Url;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::sleep;
+
+use crossbeam_channel::{bounded, Receiver, Sender};
+use tokio::sync::{Mutex, RwLock};
 
 /// Message types for the JFS protocol
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,4 +203,147 @@ pub fn get_env_var(var: &str, fallbacks: &[&str]) -> String {
     }
 
     "default".to_string()
+}
+
+/// 读取长度前缀的数据帧
+fn read_length_prefixed_frame(stream: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
+    // 先读取4字节的长度字段（大端序）
+    let length = stream.read_u32::<BigEndian>()? as usize;
+
+    // 读取指定长度的数据
+    let mut buffer = vec![0u8; length];
+    stream.read_exact(&mut buffer)?;
+
+    Ok(buffer)
+}
+
+/// 写入长度前缀的数据帧
+fn write_length_prefixed_frame(stream: &mut TcpStream, data: &[u8]) -> anyhow::Result<()> {
+    // 先写入4字节的长度字段（大端序，不包含长度字段本身）
+    stream.write_u32::<BigEndian>(data.len() as u32)?;
+
+    // 写入实际数据
+    stream.write_all(data)?;
+    stream.flush()?;
+
+    Ok(())
+}
+
+pub async fn connect_and_run(
+    write_rx: Receiver<Vec<u8>>,
+    write_tx: Sender<Vec<u8>>,
+    read_tx: Sender<Event>,
+    addr: &str,
+    watches: &Arc<RwLock<HashSet<String>>>,
+    name: &str,
+    config: &JFSConfig,
+) -> anyhow::Result<()> {
+    log::info!("Connecting to {}...", addr);
+
+    let stream = TcpStream::connect(addr)?;
+    stream.set_nonblocking(false)?; // 使用阻塞模式
+
+    // 克隆TCP流用于读写
+    let mut stream_read = stream.try_clone()?;
+    let mut stream_write = stream.try_clone()?;
+    JFSWatcher::resend_watches(&write_tx, watches, name, config).await?;
+
+    // 创建连接状态标志
+    let connection_alive = Arc::new(AtomicBool::new(true));
+    let connection_alive_clone = Arc::clone(&connection_alive);
+
+    // 读线程：从TCP读取长度前缀的数据帧并发送到读channel
+    let read_handle = tokio::spawn(async move {
+        while connection_alive_clone.load(Ordering::Relaxed) {
+            match read_length_prefixed_frame(&mut stream_read) {
+                Ok(data) => {
+                    let unpack_msg_res = unpack_msg(&data);
+                    if unpack_msg_res.is_err() {
+                        log::error!("Unpack msg error: {}", unpack_msg_res.err().unwrap());
+                        continue;
+                    }
+                    let (msg_type, msg_data) = unpack_msg_res.unwrap();
+                    if msg_type == MessageType::Event {
+                        let events = unpack_events(msg_data);
+                        if events.is_err() {
+                            log::error!("Unpack events error: {}", events.err().unwrap());
+                            continue;
+                        }
+                        for event in events.unwrap() {
+                            read_tx.send(event).unwrap();
+                        }
+                    }
+                }
+                Err(e) => {
+                    if e.downcast_ref::<std::io::Error>()
+                        .map(|io_err| io_err.kind() == std::io::ErrorKind::UnexpectedEof)
+                        .unwrap_or(false)
+                    {
+                        log::info!("Server closed connection");
+                    } else {
+                        log::error!("Read error: {}", e);
+                    }
+                    connection_alive_clone.store(false, Ordering::Relaxed);
+                    break;
+                }
+            }
+        }
+    });
+
+    // 写线程：从写channel接收数据并写入长度前缀的TCP帧
+    let write_handle = tokio::spawn(async move {
+        while connection_alive.load(Ordering::Relaxed) {
+            match write_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(data) => {
+                    if write_length_prefixed_frame(&mut stream_write, &data).is_err() {
+                        log::error!("Write error, connection may be lost");
+                        connection_alive.store(false, Ordering::Relaxed);
+                        break;
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    // 超时是正常的，继续循环检查连接状态
+                    continue;
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    log::info!("Write channel closed, stopping write thread");
+                    break;
+                }
+            }
+        }
+    });
+
+    // 使用 try_join 来避免阻塞，只要有一个线程结束就返回
+    loop {
+        // 尝试非阻塞地等待读线程
+        if read_handle.is_finished() {
+            let read_result = read_handle.await;
+            if read_result.is_err() {
+                log::error!("Read thread panicked");
+            } else {
+                log::info!("Read thread ended, connection lost");
+            }
+            // 等待写线程结束
+            let _ = write_handle.await;
+            break;
+        }
+
+        // 尝试非阻塞地等待写线程
+        if write_handle.is_finished() {
+            let write_result = write_handle.await;
+            if write_result.is_err() {
+                log::error!("Write thread panicked");
+            } else {
+                log::info!("Write thread ended, connection lost");
+            }
+            // 等待读线程结束
+            let _ = read_handle.await;
+            break;
+        }
+
+        // 短暂休眠避免忙等待
+        sleep(Duration::from_millis(10)).await;
+    }
+
+    Ok(())
 }

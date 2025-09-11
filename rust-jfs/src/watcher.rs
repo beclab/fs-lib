@@ -1,7 +1,8 @@
 use crate::errors::JFSError;
 use crate::event::Event;
 use crate::utils::{
-    get_env_var, package_msg, parse_dial_target, unpack_events, unpack_msg, MessageType,
+    connect_and_run, get_env_var, package_msg, parse_dial_target, unpack_events, unpack_msg,
+    MessageType,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -116,7 +117,7 @@ impl JFSWatcher {
 
         log::info!("Starting connection manager for {}", &name);
         // Start the connection manager
-        watcher.start_connection_manager();
+        watcher.start_connection_manager().await;
 
         Ok(watcher)
     }
@@ -125,10 +126,56 @@ impl JFSWatcher {
     pub async fn start_connection_manager(&self) {
         let config = self.config.clone();
         let name = self.name.clone();
-        let watches = Arc::clone(&self.watches);
-        let write_rx = self.write_rx.clone();
-        let write_tx = self.write_tx.clone();
-        let events_tx = self.events_tx.clone();
+        let watches: Arc<RwLock<HashSet<String>>> = Arc::clone(&self.watches);
+        let write_rx: Receiver<Vec<u8>> = self.write_rx.clone();
+        let write_tx: Sender<Vec<u8>> = self.write_tx.clone();
+        let events_tx: Sender<Event> = self.events_tx.clone();
+        JFSWatcher::send_clear_signal(&write_tx, &name, &config)
+            .await
+            .unwrap();
+
+        // 将重连循环放到独立线程中，让主线程非阻塞
+        let reconnect_handle = tokio::spawn(async move {
+            let mut retry_count = 0;
+            const MAX_RETRIES: u32 = 1000000;
+
+            loop {
+                log::info!("Attempting to connect (attempt {})...", retry_count + 1);
+
+                match connect_and_run(
+                    write_rx.clone(),
+                    write_tx.clone(),
+                    events_tx.clone(),
+                    &config.server_addr,
+                    &watches,
+                    &name,
+                    &config,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        log::info!("Connection closed by server, will reconnect...");
+                        retry_count = 0; // 重置重试计数，因为连接曾经成功过
+                    }
+                    Err(e) => {
+                        log::error!("Connection failed: {}, retrying...", e);
+                        retry_count += 1;
+
+                        if retry_count > MAX_RETRIES {
+                            log::error!("Max retries ({}) reached, giving up.", MAX_RETRIES);
+                            break;
+                        }
+
+                        // 指数退避重试
+                        let wait_time = Duration::from_millis(200 * 2_u64.pow(retry_count.min(6)));
+                        log::info!("Waiting {:?} before retry {}...", wait_time, retry_count);
+                        sleep(wait_time).await;
+                    }
+                }
+            }
+
+            log::info!("Reconnect thread exiting...");
+        });
     }
 
     /// Send clear signal to server
@@ -155,7 +202,7 @@ impl JFSWatcher {
     }
 
     /// Resend all watches to server
-    async fn resend_watches(
+    pub async fn resend_watches(
         write_tx: &Sender<Vec<u8>>,
         watches: &Arc<RwLock<HashSet<String>>>,
         name: &str,
