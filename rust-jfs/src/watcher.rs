@@ -167,44 +167,6 @@ impl JFSWatcher {
 
                 let (protocol, addr) = parse_dial_target(&config.server_addr).unwrap();
 
-                let stream_result = TcpStream::connect(addr).await;
-                match stream_result {
-                    Ok(stream) => {
-                        let (mut stream_tx, mut stream_rx) = stream.split();
-
-                        tokio::spawn(async move {
-                            while let Ok(data) = write_rx.recv() {
-                                // Create frame with length prefix
-                                let mut frame = BytesMut::with_capacity(4 + data.len());
-
-                                // Add 4-byte length field (BigEndian, data length only)
-                                frame.put_u32(data.len() as u32);
-
-                                // Add data
-                                frame.put_slice(&data);
-
-                                // Write the complete frame
-                                // let result = stream_tx.write(&frame).await;
-                                //if let Err(e) = result {
-                                //log::error!("Write frame error: {}", e);
-                                //}
-                            }
-                        });
-                        // Wait for reconnection signal
-                        let _ = async { reconnect_rx.recv() }.await;
-
-                        // Start write handler
-                        //Self::start_write_handler(&read_tx, &write_tx);
-
-                        // Start reading from connection
-                        //Self::start_reader(&read_rx, &events_tx, &errors_tx, &reconnect_tx);
-                    }
-                    Err(e) => {
-                        log::error!("Failed to connect to {}: {}", config.server_addr, e);
-                        sleep(Duration::from_secs(1)).await;
-                    }
-                }
-
                 /**
                     // Try to connect
                     match Self::connect_to_server(&config, &name).await {
@@ -453,6 +415,114 @@ impl JFSWatcher {
             _ => {
                 log::debug!("Received message type: {:?}", msg_type);
             }
+        }
+
+        Ok(())
+    }
+
+    fn connect_and_run(
+        write_rx: Receiver<Vec<u8>>,
+        read_tx: Sender<Vec<u8>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let addr = "127.0.0.1:8080";
+        println!("Connecting to {}...", addr);
+
+        let stream = TcpStream::connect(addr)?;
+        stream.set_nonblocking(false)?; // 使用阻塞模式
+
+        // 克隆TCP流用于读写
+        let mut stream_read = stream.try_clone()?;
+        let mut stream_write = stream.try_clone()?;
+
+        // 创建连接状态标志
+        let connection_alive = Arc::new(AtomicBool::new(true));
+        let connection_alive_clone = Arc::clone(&connection_alive);
+
+        // 读线程：从TCP读取数据并发送到读channel
+        let read_handle = thread::spawn(move || {
+            let mut buffer = vec![0; 1024];
+
+            while connection_alive_clone.load(Ordering::Relaxed) {
+                match stream_read.read(&mut buffer) {
+                    Ok(0) => {
+                        println!("Server closed connection");
+                        connection_alive_clone.store(false, Ordering::Relaxed);
+                        break;
+                    }
+                    Ok(n) => {
+                        let data = buffer[..n].to_vec();
+                        if read_tx.send(data).is_err() {
+                            println!("Read channel closed, stopping read thread");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Read error: {}", e);
+                        connection_alive_clone.store(false, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // 写线程：从写channel接收数据并写入TCP
+        let write_handle = thread::spawn(move || {
+            while connection_alive.load(Ordering::Relaxed) {
+                match write_rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(data) => {
+                        if stream_write.write_all(&data).is_err() {
+                            eprintln!("Write error, connection may be lost");
+                            connection_alive.store(false, Ordering::Relaxed);
+                            break;
+                        }
+                        if stream_write.flush().is_err() {
+                            eprintln!("Flush error, connection may be lost");
+                            connection_alive.store(false, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        // 超时是正常的，继续循环检查连接状态
+                        continue;
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                        println!("Write channel closed, stopping write thread");
+                        break;
+                    }
+                }
+            }
+        });
+
+        // 使用 try_join 来避免阻塞，只要有一个线程结束就返回
+        loop {
+            // 尝试非阻塞地等待读线程
+            if read_handle.is_finished() {
+                let read_result = read_handle.join();
+                if read_result.is_err() {
+                    eprintln!("Read thread panicked");
+                } else {
+                    println!("Read thread ended, connection lost");
+                }
+                // 等待写线程结束
+                let _ = write_handle.join();
+                break;
+            }
+
+            // 尝试非阻塞地等待写线程
+            if write_handle.is_finished() {
+                let write_result = write_handle.join();
+                if write_result.is_err() {
+                    eprintln!("Write thread panicked");
+                } else {
+                    println!("Write thread ended, connection lost");
+                }
+                // 等待读线程结束
+                let _ = read_handle.join();
+                break;
+            }
+
+            // 短暂休眠避免忙等待
+            tokio::time::sleep(Duration::from_millis(10));
         }
 
         Ok(())
