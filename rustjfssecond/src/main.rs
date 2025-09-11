@@ -5,6 +5,31 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+
+/// 读取长度前缀的数据帧
+fn read_length_prefixed_frame(stream: &mut TcpStream) -> Result<Vec<u8>, std::io::Error> {
+    // 先读取4字节的长度字段（大端序）
+    let length = stream.read_u32::<BigEndian>()? as usize;
+    
+    // 读取指定长度的数据
+    let mut buffer = vec![0u8; length];
+    stream.read_exact(&mut buffer)?;
+    
+    Ok(buffer)
+}
+
+/// 写入长度前缀的数据帧
+fn write_length_prefixed_frame(stream: &mut TcpStream, data: &[u8]) -> Result<(), std::io::Error> {
+    // 先写入4字节的长度字段（大端序，不包含长度字段本身）
+    stream.write_u32::<BigEndian>(data.len() as u32)?;
+    
+    // 写入实际数据
+    stream.write_all(data)?;
+    stream.flush()?;
+    
+    Ok(())
+}
 
 /// 业务侧入口：管理双channel的TCP读写和重连
 #[tokio::main]
@@ -125,26 +150,22 @@ async fn connect_and_run(
     let connection_alive = Arc::new(AtomicBool::new(true));
     let connection_alive_clone = Arc::clone(&connection_alive);
 
-    // 读线程：从TCP读取数据并发送到读channel
+    // 读线程：从TCP读取长度前缀的数据帧并发送到读channel
     let read_handle = tokio::spawn(async move {
-        let mut buffer = vec![0; 1024];
-
         while connection_alive_clone.load(Ordering::Relaxed) {
-            match stream_read.read(&mut buffer) {
-                Ok(0) => {
-                    log::info!("Server closed connection");
-                    connection_alive_clone.store(false, Ordering::Relaxed);
-                    break;
-                }
-                Ok(n) => {
-                    let data = buffer[..n].to_vec();
+            match read_length_prefixed_frame(&mut stream_read) {
+                Ok(data) => {
                     if read_tx.send(data).is_err() {
                         log::info!("Read channel closed, stopping read thread");
                         break;
                     }
                 }
                 Err(e) => {
-                    log::error!("Read error: {}", e);
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                        log::info!("Server closed connection");
+                    } else {
+                        log::error!("Read error: {}", e);
+                    }
                     connection_alive_clone.store(false, Ordering::Relaxed);
                     break;
                 }
@@ -152,18 +173,13 @@ async fn connect_and_run(
         }
     });
 
-    // 写线程：从写channel接收数据并写入TCP
+    // 写线程：从写channel接收数据并写入长度前缀的TCP帧
     let write_handle = tokio::spawn(async move {
         while connection_alive.load(Ordering::Relaxed) {
             match write_rx.recv_timeout(Duration::from_millis(100)) {
                 Ok(data) => {
-                    if stream_write.write_all(&data).is_err() {
+                    if write_length_prefixed_frame(&mut stream_write, &data).is_err() {
                         log::error!("Write error, connection may be lost");
-                        connection_alive.store(false, Ordering::Relaxed);
-                        break;
-                    }
-                    if stream_write.flush().is_err() {
-                        log::error!("Flush error, connection may be lost");
                         connection_alive.store(false, Ordering::Relaxed);
                         break;
                     }
