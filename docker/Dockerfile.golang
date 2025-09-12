@@ -24,4 +24,4 @@ FROM gcr.io/distroless/base:debug
 WORKDIR /
 COPY --from=builder /workspace/bytetrade.io/web3os/fs-lib/golangwatcher .
 
-ENTRYPOINT ["/golangwatcher"]
+ENTRYPOINT ["/golangwatcher", "-path", "/data/pvc-userspace-harvey063-s2vmddryovcuqwnz/Home/Documents"]

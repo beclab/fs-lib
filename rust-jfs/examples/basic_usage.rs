@@ -4,7 +4,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 // /data/pvc-userspace-harvey063-s2vmddryovcuqwnz/Home/Documents
-// ./example -path /data/pvc-userspace-harvey063-s2vmddryovcuqwnz/Home/Documents
+// ./example  /data/pvc-userspace-harvey063-s2vmddryovcuqwnz/Home/Documents
 // ps aux | grep rustexample | grep -v grep
 // ./upload_to_mo.sh /var/wangzhong/fs-lib/rust-jfs/target/debug/rustexample
 #[tokio::main]
@@ -14,18 +14,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Get command line arguments
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        log::error!("Usage: {} <path1> [path2] [path3] ...", args[0]);
-        log::error!("Example: {} /tmp/test_dir /tmp/another_dir", args[0]);
-        std::process::exit(1);
-    }
+    let paths_to_watch = if args.len() >= 2 {
+        // Use command line arguments if provided
+        args[1..].to_vec()
+    } else {
+        // Try to get path from environment variable
+        if let Ok(env_path) = env::var("WATCHED_PATH") {
+            vec![env_path]
+        } else {
+            // Use default path
+            vec!["/data/pvc-userspace-harvey063-s2vmddryovcuqwnz/Home/Documents".to_string()]
+        }
+    };
 
     // Create a new JFS watcher
     let watcher = JFSWatcher::new("mywatcher").await?;
     // watcher.start_connection_manager();
 
-    // Add paths from command line arguments
-    for path in &args[1..] {
+    // Add paths to watch
+    for path in &paths_to_watch {
         log::info!("Adding watch for: {}", path);
         watcher.add(path).await?;
     }
@@ -35,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // let errors_rx = watcher.errors_receiver();
 
     log::info!("JFS Watcher started. Watching for file system events...");
-    log::info!("Watching paths: {:?}", &args[1..]);
+    log::info!("Watching paths: {:?}", &paths_to_watch);
     log::info!("Try creating, modifying, or deleting files in the watched directories");
 
     // Spawn a task to handle events
@@ -77,8 +84,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Current watch list: {:?}", watch_list);
 
         // Remove a watch (remove the last path if there are multiple)
-        if args.len() > 2 {
-            let path_to_remove = &args[args.len() - 1];
+        if paths_to_watch.len() > 1 {
+            let path_to_remove = &paths_to_watch[paths_to_watch.len() - 1];
             watcher.remove(path_to_remove).await?;
             println!("Removed {} from watch list", path_to_remove);
         }
