@@ -72,15 +72,8 @@ pub struct JFSWatcher {
     watches: Arc<RwLock<HashSet<String>>>,
     events_tx: Sender<Event>,
     events_rx: Receiver<Event>,
-    //errors_tx: Sender<JFSError>,
-    //errors_rx: Receiver<JFSError>,
-    // connection: Arc<Mutex<Option<Box<dyn FrameConnection>>>>,
     write_tx: Sender<Vec<u8>>,
     write_rx: Receiver<Vec<u8>>,
-    //shutdown_tx: Sender<()>,
-    //shutdown_rx: Receiver<()>,
-    //reconnect_tx: Sender<()>,
-    //reconnect_rx: Receiver<()>,
 }
 
 impl JFSWatcher {

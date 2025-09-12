@@ -3,6 +3,8 @@ use std::env;
 use std::time::Duration;
 use tokio::time::sleep;
 
+// /data/pvc-userspace-harvey063-s2vmddryovcuqwnz/Home/Documents
+// ./example -path /data/pvc-userspace-harvey063-s2vmddryovcuqwnz/Home/Documents
 // ps aux | grep rustexample | grep -v grep
 // ./upload_to_mo.sh /var/wangzhong/fs-lib/rust-jfs/target/debug/rustexample
 #[tokio::main]
@@ -44,16 +46,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Handle specific event types
             if event.has(Op::CREATE) {
-                log::info!("  -> File created: {}", event.name);
+                log::info!("create event: {}", event);
             }
             if event.has(Op::WRITE) {
-                log::info!("  -> File written: {}", event.name);
+                log::info!("write event: {}", event);
             }
             if event.has(Op::REMOVE) {
-                log::info!("  -> File removed: {}", event.name);
+                log::info!("remove event: {}", event);
             }
             if event.has(Op::RENAME) {
-                log::info!("  -> File renamed: {}", event.name);
+                log::info!("rename event: {}", event);
             }
         }
     });
