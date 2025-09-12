@@ -1,0 +1,42 @@
+FROM ubuntu:jammy As builder
+
+# RUN apk add openssl-dev musl-dev g++
+
+RUN mkdir -p /rustwatcher && \
+    apt update && \
+    apt install curl -y && \
+    curl https://sh.rustup.rs -sSf | bash -s -- -y && \
+    # echo 'source $HOME/.cargo/env' >> $HOME/.bashrc && \
+    apt install build-essential -y && \
+    apt-get install libssl-dev -y && \
+    apt-get install pkg-config -y && \
+    apt install libpq-dev -y
+    
+ENV PATH="/root/.cargo/bin:${PATH}"
+WORKDIR /rustwatcher
+COPY rust-jfs/src  /rustwatcher/src
+COPY rust-jfs/Cargo.toml /rustwatcher/Cargo.toml
+
+RUN cargo build --release
+
+
+
+FROM  ubuntu:jammy
+
+# Import from builder.
+ENV LANG C.UTF-8
+
+
+WORKDIR /rustwatcher
+
+# Copy our build
+COPY --from=builder /rustwatcher/target/release/rustexample ./
+
+COPY --from=builder /lib/aarch64-linux-gnu/libpq.so /lib/aarch64-linux-gnu/libpq.so
+COPY --from=builder /lib/aarch64-linux-gnu/libpq.so.5 /lib/aarch64-linux-gnu/libpq.so.5
+COPY --from=builder /lib/aarch64-linux-gnu/libpq.so.5.14 /lib/aarch64-linux-gnu/libpq.so.5.14
+COPY --from=builder /lib/aarch64-linux-gnu/libldap-2.5.so.0 /lib/aarch64-linux-gnu/libldap-2.5.so.0
+COPY --from=builder /lib/aarch64-linux-gnu/liblber-2.5.so.0 /lib/aarch64-linux-gnu/liblber-2.5.so.0
+COPY --from=builder /lib/aarch64-linux-gnu/libsasl2.so.2 /lib/aarch64-linux-gnu/libsasl2.so.2
+ENV RUST_BACKTRACE=full
+CMD ["/rustwatcher/rustexample"]
