@@ -1,0 +1,69 @@
+name: Publish to Dockerhub ( rustwatcher )
+
+on:
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: "Release Tags"
+
+jobs:
+  publish_dockerhub_amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASS }}
+
+      - name: Build rustwatcher and push Docker image
+        uses: docker/build-push-action@v3
+        with:
+          push: true
+          tags: beclab/rustwatcher:${{ github.event.inputs.tags }}-amd64
+          file: docker/Dockerfile.rustwatcher.amd64
+          platforms: linux/amd64
+
+  publish_dockerhub_arm64:
+    runs-on: [linux-arm64-utuntu22.04-4core-16g]
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASS }}
+
+      - name: Build rustwatcher and push Docker image
+        uses: docker/build-push-action@v3
+        with:
+          push: true
+          tags: beclab/rustwatcher:${{ github.event.inputs.tags }}-arm64
+          file: docker/Dockerfile.rustwatcher.arm64
+          platforms: linux/arm64
+
+  publish_manifest:
+    needs:
+      - publish_dockerhub_amd64
+      - publish_dockerhub_arm64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASS }}
+
+      - name: Push manifest
+        run: |
+          docker manifest create beclab/rustwatcher:${{ github.event.inputs.tags }} --amend beclab/rustwatcher:${{ github.event.inputs.tags }}-amd64 --amend beclab/rustwatcher:${{ github.event.inputs.tags }}-arm64
+          docker manifest push beclab/rustwatcher:${{ github.event.inputs.tags }}
