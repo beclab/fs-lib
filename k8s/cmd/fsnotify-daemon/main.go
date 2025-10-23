@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag"
 
-	"bytetrade.io/web3os/fs-lib/k8s/cmd/fsnotify-daemon/app"
+	appv2 "bytetrade.io/web3os/fs-lib/k8s/cmd/fsnotify-daemon/app/v2"
 	fswatchers "bytetrade.io/web3os/fs-lib/k8s/pkg/fswatchers/v1alpha1"
 	informers "bytetrade.io/web3os/fs-lib/k8s/pkg/generated/informers/externalversions"
 	"bytetrade.io/web3os/fs-lib/k8s/pkg/signals"
@@ -32,7 +32,7 @@ func main() {
 	informerFactory := informers.NewSharedInformerFactory(sysClient, 0)
 	informer := informerFactory.Sys().V1alpha1().FSWatchers()
 
-	app, err := app.New(apiCtx, informer.Lister(), stopCh)
+	app, err := appv2.New(apiCtx, informer.Lister(), stopCh)
 	if err != nil {
 		panic(err)
 	}
