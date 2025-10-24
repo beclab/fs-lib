@@ -2,7 +2,6 @@ package app
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -66,6 +65,11 @@ func (w *watcher) WriteMsg(msg string) error {
 		data, err := w.translateEventNameInCluster(event)
 		if err != nil {
 			return err
+		}
+
+		if data == nil {
+			// event not in this pod
+			return nil
 		}
 
 		klog.Info("send msg to watcher, ", event)
@@ -138,7 +142,7 @@ func (w *watcher) translateEventNameInCluster(event *jfsnotify.Event) ([]byte, e
 
 	keyInPod, ok := w.podPathMap[event.Key]
 	if !ok {
-		return nil, fmt.Errorf("event key not found, %s", event.Key)
+		return nil, nil
 	}
 
 	event.Name = strings.Replace(event.Name, event.Key, keyInPod, 1)
