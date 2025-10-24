@@ -3,6 +3,7 @@ package v2
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"bytetrade.io/web3os/fs-lib/jfsnotify"
 	sysv1alpha1 "bytetrade.io/web3os/fs-lib/k8s/pkg/apis/sys/v1alpha1"
@@ -62,10 +63,12 @@ func (a *App) run(stopCh <-chan struct{}) (bool, error) {
 				return false, nil
 			}
 
+			nameTokenized := strings.SplitN(e.Name, "/", -1)
+			key := strings.Join(nameTokenized[:len(nameTokenized)-1], "/")
 			event := jfsnotify.Event{
 				Name: e.Name,
 				Op:   jfsnotify.Op(e.Op),
-				Key:  e.Name,
+				Key:  key,
 			}
 			klog.V(8).Info("fsnotify event: ", event)
 			data, err := json.Marshal([]*jfsnotify.Event{&event})
