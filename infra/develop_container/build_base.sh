@@ -11,9 +11,9 @@ PREFIX=beclab
 
 
 docker  build    \
-    --build-arg https_proxy=http://192.168.31.200:7890 \
-    --build-arg http_proxy=http://192.168.31.200:7890 \
-    --build-arg all_proxy=socks5://192.168.31.200:7890 \
+    --build-arg https_proxy=http://192.168.31.140:7890 \
+    --build-arg http_proxy=http://192.168.31.140:7890 \
+    --build-arg all_proxy=socks5://192.168.31.140:7890 \
     -f ${DOCKER_FILE_PATH} \
     -t ${PREFIX}/fs_lib_develop $root_dir
 

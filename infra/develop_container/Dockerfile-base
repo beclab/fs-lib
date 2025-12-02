@@ -1,7 +1,14 @@
 FROM beclab/zzcommondevelop:latest
 
+# Install Go 1.24.4
+RUN curl -fsSL https://go.dev/dl/go1.24.4.linux-amd64.tar.gz -o /tmp/go.tar.gz && \
+    tar -C /usr/local -xzf /tmp/go.tar.gz && \
+    rm /tmp/go.tar.gz && \
+    mkdir -p /go/bin /go/src /go/pkg
 
-
+ENV PATH=$PATH:/usr/local/go/bin
+ENV GOPATH=/go
+ENV GOROOT=/usr/local/go
 
 RUN mkdir -p /opt/fs-lib 
 ENTRYPOINT ["tail", "-f", "/dev/null"]
