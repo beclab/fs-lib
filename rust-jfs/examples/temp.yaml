@@ -1,0 +1,6 @@
+            - name: NAMESPACE
+              value: os-framework
+            - name: CONTAINER_NAME
+              value: search3monitor
+            - name: NOTIFY_SERVER
+              value: fsnotify-svc.os-platform:5079
