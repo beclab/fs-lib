@@ -21,14 +21,18 @@ import (
 	"k8s.io/klog/v2"
 )
 
+// cd /data/pvc-userspace-harvey063-1x9wavlxusicut0h/Home/Documents
+// ./example -path /data/pvc-userspace-harvey063-1x9wavlxusicut0h/Home/Documents
+
 func main() {
 	// 定义命令行参数
 	var watchPath = flag.String("path", "", "Path to watch for file system events")
 	flag.Parse()
 
-	// 检查是否提供了路径参数
-	if *watchPath == "" {
-		klog.Fatal("Please provide a path to watch using -path flag")
+	// 如果输入参数为空，使用默认路径
+	path := *watchPath
+	if path == "" {
+		path = "/data/pvc-userspace-harvey063-jbwscqycsqk3yqls/Home/Documents"
 	}
 
 	watcher, err := jfsnotify.NewWatcher("mywatcher") // a single name of every watcher
@@ -47,8 +51,8 @@ func main() {
 		}
 	}()
 
-	klog.Info("add ", *watchPath, " to watch")
-	err = watcher.Add(*watchPath)
+	klog.Info("add ", path, " to watch")
+	err = watcher.Add(path)
 	if err != nil {
 		klog.Error(err)
 	}
