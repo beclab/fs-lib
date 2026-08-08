@@ -104,13 +104,13 @@ func (s *Server) multicastMsg(msg string) {
 
 	s.mu.RUnlock()
 
-	klog.Infof("fanout redis event connected=%d writers=%d payload_len=%d", n, len(funcs), len(msg))
-
 	if n == 0 || len(funcs) == 0 {
 		klog.Warning("redis event not fanned out: no watch clients, connected=", n,
 			" writers=", len(funcs), " payload_len=", len(msg))
 		return
 	}
+
+	klog.V(4).Infof("fanout redis event connected=%d writers=%d payload_len=%d", n, len(funcs), len(msg))
 
 	for _, f := range funcs {
 		f()

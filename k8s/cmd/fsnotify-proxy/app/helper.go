@@ -142,9 +142,9 @@ func (w *watcher) armWriteDebounce(event jfsnotify.Event, sendEvent func(*jfsnot
 	})
 
 	if exists {
-		klog.Infof("debounce_reset cid=%s channel=%s name=%s", w.clientCID(), w.ChannelID, name)
+		klog.V(4).Infof("debounce_reset cid=%s channel=%s name=%s", w.clientCID(), w.ChannelID, name)
 	} else {
-		klog.Infof("debounce_arm cid=%s channel=%s name=%s", w.clientCID(), w.ChannelID, name)
+		klog.V(4).Infof("debounce_arm cid=%s channel=%s name=%s", w.clientCID(), w.ChannelID, name)
 	}
 }
 
