@@ -87,23 +87,32 @@ func (s *Server) removeChannel(c *Client, err error) {
 func (s *Server) multicastMsg(msg string) {
 	var funcs []func()
 	s.mu.RLock()
+	n := len(s.watchClients)
 
 	for _, c := range s.watchClients {
-		if writer, ok := c.Helper.(MsgWriter); ok {
-
-			funcs = append(funcs, func() {
-				err := writer.WriteMsg(msg)
-				if err != nil {
-					klog.Error("send msg to client error, ", err)
-				}
-			})
+		c := c // per-iteration copy for closures (Go <1.22 loop var safety)
+		writer, ok := c.Helper.(MsgWriter)
+		if !ok {
+			continue
 		}
+		funcs = append(funcs, func() {
+			if err := writer.WriteMsg(msg); err != nil {
+				klog.Error("send msg to client error, ", err, ", cid=", c.CID())
+			}
+		})
 	}
 
 	s.mu.RUnlock()
 
+	if n == 0 || len(funcs) == 0 {
+		klog.Warning("redis event not fanned out: no watch clients, connected=", n,
+			" writers=", len(funcs), " payload_len=", len(msg))
+		return
+	}
+
+	klog.V(4).Infof("fanout redis event connected=%d writers=%d payload_len=%d", n, len(funcs), len(msg))
+
 	for _, f := range funcs {
 		f()
 	}
-
 }
