@@ -11,6 +11,8 @@ import (
 	"k8s.io/klog/v2"
 )
 
+const writeDebounce = time.Second
+
 type DebugRWMutex struct {
 	mu sync.RWMutex
 }
@@ -35,6 +37,13 @@ func (d *DebugRWMutex) RUnlock() {
 	d.mu.RUnlock()
 }
 
+// delayedWrite holds a resettable debounce timer and the latest WRITE snapshot.
+type delayedWrite struct {
+	timer *time.Timer
+	event jfsnotify.Event
+	gen   uint64 // bumped on each arm; stale AfterFunc callbacks ignore mismatch
+}
+
 type watcher struct {
 	multicast.MsgWriter
 	client         *multicast.Client
@@ -47,7 +56,7 @@ type watcher struct {
 	PodNS          string
 	PodName        string
 	Container      string
-	delayWriteMsgs map[string]time.Time
+	delayedWrites  map[string]*delayedWrite
 }
 
 func (w *watcher) clientCID() string {
@@ -64,9 +73,9 @@ func (w *watcher) logTarget(prefix string, event *jfsnotify.Event) {
 
 func NewWatcher(c *multicast.Client) *watcher {
 	return &watcher{
-		client:         c,
-		podPathMap:     make(map[string]string),
-		delayWriteMsgs: make(map[string]time.Time),
+		client:        c,
+		podPathMap:    make(map[string]string),
+		delayedWrites: make(map[string]*delayedWrite),
 	}
 }
 
@@ -102,25 +111,8 @@ func (w *watcher) WriteMsg(msg string) error {
 	for _, event := range events {
 		switch event.Op {
 		case jfsnotify.Write:
-			startTimer := func() bool {
-				w.mu.Lock()
-				defer w.mu.Unlock()
-				_, ok := w.delayWriteMsgs[event.Name]
-				w.delayWriteMsgs[event.Name] = time.Now()
-				return !ok
-			}()
-			if startTimer {
-				klog.Infof("WriteMsg branch=debounce_start cid=%s channel=%s op=%v name=%s",
-					w.clientCID(), w.ChannelID, event.Op, event.Name)
-				w.send(*event, sendEvent)
-			} else {
-				klog.Infof("WriteMsg branch=debounce_refresh cid=%s channel=%s op=%v name=%s",
-					w.clientCID(), w.ChannelID, event.Op, event.Name)
-			}
-
+			w.armWriteDebounce(*event, sendEvent)
 		default:
-			klog.Infof("WriteMsg branch=immediate cid=%s channel=%s op=%v name=%s",
-				w.clientCID(), w.ChannelID, event.Op, event.Name)
 			return sendEvent(event)
 		}
 	}
@@ -128,36 +120,50 @@ func (w *watcher) WriteMsg(msg string) error {
 	return nil
 }
 
-func (w *watcher) send(localEvent jfsnotify.Event, sendEvent func(e *jfsnotify.Event) error) {
-	deley := time.NewTimer(time.Second)
-	go func() {
-		<-deley.C
-		w.mu.Lock()
-		t, ok := w.delayWriteMsgs[localEvent.Name]
-		var since time.Duration
-		if ok {
-			since = time.Since(t)
-		}
-		reschedule := ok && since < time.Second
+// armWriteDebounce (W2): on every WRITE, store the latest event and (re)arm a 1s timer.
+func (w *watcher) armWriteDebounce(event jfsnotify.Event, sendEvent func(*jfsnotify.Event) error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	name := event.Name
+	d, exists := w.delayedWrites[name]
+	if !exists {
+		d = &delayedWrite{}
+		w.delayedWrites[name] = d
+	}
+	if d.timer != nil {
+		d.timer.Stop()
+	}
+	d.event = event
+	d.gen++
+	gen := d.gen
+	d.timer = time.AfterFunc(writeDebounce, func() {
+		w.flushWriteDebounce(name, gen, sendEvent)
+	})
+
+	if exists {
+		klog.Infof("debounce_reset cid=%s channel=%s name=%s", w.clientCID(), w.ChannelID, name)
+	} else {
+		klog.Infof("debounce_arm cid=%s channel=%s name=%s", w.clientCID(), w.ChannelID, name)
+	}
+}
+
+// flushWriteDebounce (W3): after quiet period, send the latest WRITE snapshot and clear state.
+func (w *watcher) flushWriteDebounce(name string, gen uint64, sendEvent func(*jfsnotify.Event) error) {
+	w.mu.Lock()
+	d, ok := w.delayedWrites[name]
+	if !ok || d.gen != gen {
 		w.mu.Unlock()
+		return
+	}
+	ev := d.event
+	delete(w.delayedWrites, name)
+	w.mu.Unlock()
 
-		if reschedule {
-			klog.Infof("write_debounce_fire action=reschedule cid=%s channel=%s name=%s since=%s",
-				w.clientCID(), w.ChannelID, localEvent.Name, since)
-			w.send(localEvent, sendEvent)
-			return
-		}
-		klog.Infof("write_debounce_fire action=send cid=%s channel=%s name=%s ok=%v since=%s",
-			w.clientCID(), w.ChannelID, localEvent.Name, ok, since)
-		err := sendEvent(&localEvent)
-		if err != nil {
-			klog.Error("send write event error, ", err, ", ", localEvent.Name)
-		}
-		w.mu.Lock()
-		defer w.mu.Unlock()
-		delete(w.delayWriteMsgs, localEvent.Name)
-	}()
-
+	klog.Infof("debounce_flush cid=%s channel=%s name=%s", w.clientCID(), w.ChannelID, name)
+	if err := sendEvent(&ev); err != nil {
+		klog.Error("send write event error, ", err, ", ", name)
+	}
 }
 
 func (w *watcher) Close() {
