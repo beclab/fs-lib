@@ -167,7 +167,22 @@ func (w *watcher) flushWriteDebounce(name string, gen uint64, sendEvent func(*jf
 }
 
 func (w *watcher) Close() {
-	w.Remove()
+	w.mu.Lock()
+	n := len(w.delayedWrites)
+	for name, d := range w.delayedWrites {
+		if d != nil && d.timer != nil {
+			d.timer.Stop()
+		}
+		delete(w.delayedWrites, name)
+	}
+	w.mu.Unlock()
+	if n > 0 {
+		klog.Infof("debounce_cancel_all cid=%s channel=%s count=%d", w.clientCID(), w.ChannelID, n)
+	}
+
+	if w.Remove != nil {
+		w.Remove()
+	}
 }
 
 func (w *watcher) parseMsg(msg string) ([]*jfsnotify.Event, error) {
