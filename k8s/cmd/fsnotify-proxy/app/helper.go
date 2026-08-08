@@ -84,7 +84,9 @@ func (w *watcher) WriteMsg(msg string) error {
 		}
 
 		if data == nil {
-			// event not in this pod
+			// event path not mapped for this watcher
+			klog.Infof("unmap_skip event for watcher channel=%s cid=%s key=%s name=%s",
+				w.ChannelID, w.clientCID(), event.Key, event.Name)
 			return nil
 		}
 
