@@ -11,7 +11,8 @@ import (
 	"k8s.io/klog/v2"
 )
 
-const writeDebounce = time.Second
+// writeDebounce is the quiet period before flushing a WRITE. Tests may shorten it.
+var writeDebounce = time.Second
 
 type DebugRWMutex struct {
 	mu sync.RWMutex
@@ -57,6 +58,8 @@ type watcher struct {
 	PodName        string
 	Container      string
 	delayedWrites  map[string]*delayedWrite
+	// testSendEvent, when set, replaces translate/SendBytes (unit tests only).
+	testSendEvent func(*jfsnotify.Event) error
 }
 
 func (w *watcher) clientCID() string {
@@ -85,27 +88,30 @@ func (w *watcher) WriteMsg(msg string) error {
 		return err
 	}
 
-	sendEvent := func(event *jfsnotify.Event) error {
-		w.logTarget("translate msg to watcher,", event)
-		data, err := w.translateEventNameInCluster(event)
-		if err != nil {
-			return err
-		}
+	sendEvent := w.testSendEvent
+	if sendEvent == nil {
+		sendEvent = func(event *jfsnotify.Event) error {
+			w.logTarget("translate msg to watcher,", event)
+			data, err := w.translateEventNameInCluster(event)
+			if err != nil {
+				return err
+			}
 
-		if data == nil {
-			// event path not mapped for this watcher
-			klog.Infof("unmap_skip event for watcher channel=%s cid=%s key=%s name=%s",
-				w.ChannelID, w.clientCID(), event.Key, event.Name)
+			if data == nil {
+				// event path not mapped for this watcher
+				klog.Infof("unmap_skip event for watcher channel=%s cid=%s key=%s name=%s",
+					w.ChannelID, w.clientCID(), event.Key, event.Name)
+				return nil
+			}
+
+			w.logTarget("send msg to watcher,", event)
+			err = w.client.SendBytes(data)
+			if err != nil {
+				return err
+			}
+
 			return nil
 		}
-
-		w.logTarget("send msg to watcher,", event)
-		err = w.client.SendBytes(data)
-		if err != nil {
-			return err
-		}
-
-		return nil
 	}
 
 	for _, event := range events {
