@@ -102,17 +102,25 @@ func (w *watcher) WriteMsg(msg string) error {
 	for _, event := range events {
 		switch event.Op {
 		case jfsnotify.Write:
-			if func() bool {
+			startTimer := func() bool {
 				w.mu.Lock()
 				defer w.mu.Unlock()
 				_, ok := w.delayWriteMsgs[event.Name]
 				w.delayWriteMsgs[event.Name] = time.Now()
 				return !ok
-			}() {
+			}()
+			if startTimer {
+				klog.Infof("WriteMsg branch=debounce_start cid=%s channel=%s op=%v name=%s",
+					w.clientCID(), w.ChannelID, event.Op, event.Name)
 				w.send(*event, sendEvent)
+			} else {
+				klog.Infof("WriteMsg branch=debounce_refresh cid=%s channel=%s op=%v name=%s",
+					w.clientCID(), w.ChannelID, event.Op, event.Name)
 			}
 
 		default:
+			klog.Infof("WriteMsg branch=immediate cid=%s channel=%s op=%v name=%s",
+				w.clientCID(), w.ChannelID, event.Op, event.Name)
 			return sendEvent(event)
 		}
 	}
@@ -124,10 +132,23 @@ func (w *watcher) send(localEvent jfsnotify.Event, sendEvent func(e *jfsnotify.E
 	deley := time.NewTimer(time.Second)
 	go func() {
 		<-deley.C
-		if t, ok := w.delayWriteMsgs[localEvent.Name]; ok && time.Since(t) < time.Second {
+		w.mu.Lock()
+		t, ok := w.delayWriteMsgs[localEvent.Name]
+		var since time.Duration
+		if ok {
+			since = time.Since(t)
+		}
+		reschedule := ok && since < time.Second
+		w.mu.Unlock()
+
+		if reschedule {
+			klog.Infof("write_debounce_fire action=reschedule cid=%s channel=%s name=%s since=%s",
+				w.clientCID(), w.ChannelID, localEvent.Name, since)
 			w.send(localEvent, sendEvent)
 			return
 		}
+		klog.Infof("write_debounce_fire action=send cid=%s channel=%s name=%s ok=%v since=%s",
+			w.clientCID(), w.ChannelID, localEvent.Name, ok, since)
 		err := sendEvent(&localEvent)
 		if err != nil {
 			klog.Error("send write event error, ", err, ", ", localEvent.Name)
