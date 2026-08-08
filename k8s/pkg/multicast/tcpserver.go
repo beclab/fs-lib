@@ -84,6 +84,14 @@ func (c *Client) Conn() net.Conn {
 	return c.conn
 }
 
+// CID returns the server-assigned connection id for this client.
+func (c *Client) CID() string {
+	if c == nil {
+		return ""
+	}
+	return c.cid
+}
+
 func (c *Client) Close() error {
 	return c.fconn.Close()
 }

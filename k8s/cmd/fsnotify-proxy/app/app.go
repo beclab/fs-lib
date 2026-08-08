@@ -125,6 +125,11 @@ func (a *App) processWatcherMessage(c *multicast.Client, msg []byte) error {
 		return err
 	}
 
+	watcher.ChannelID = channelId
+	watcher.PodNS = namespace
+	watcher.PodName = podname
+	watcher.Container = containername
+
 	// find pod's volume to map the pod path to node path
 	pod, err := a.k8sClientSet.CoreV1().Pods(namespace).Get(a.ctx, podname, metav1.GetOptions{})
 	if err != nil {
@@ -196,6 +201,9 @@ func (a *App) processWatcherMessage(c *multicast.Client, msg []byte) error {
 	}
 
 	watcherName, w, err := a.getWatcher(channelId)
+	watcher.CRName = watcherName
+	watcher.CRNamespace = namespace
+
 	if err != nil && apierrors.IsNotFound(err) {
 		w = &v1alpha1.FSWatcher{
 			ObjectMeta: metav1.ObjectMeta{
@@ -218,9 +226,6 @@ func (a *App) processWatcherMessage(c *multicast.Client, msg []byte) error {
 
 	w.Spec.Paths = currentPath
 	_, err = a.clientSet.SysV1alpha1().FSWatchers(namespace).Update(a.ctx, w, metav1.UpdateOptions{})
-
-	watcher.CRName = watcherName
-	watcher.CRNamespace = namespace
 	return err
 }
 

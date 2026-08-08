@@ -43,7 +43,23 @@ type watcher struct {
 	Remove         func()
 	CRName         string
 	CRNamespace    string
+	ChannelID      string // "ns/pod/container"
+	PodNS          string
+	PodName        string
+	Container      string
 	delayWriteMsgs map[string]time.Time
+}
+
+func (w *watcher) clientCID() string {
+	if w == nil || w.client == nil {
+		return ""
+	}
+	return w.client.CID()
+}
+
+func (w *watcher) logTarget(prefix string, event *jfsnotify.Event) {
+	klog.Infof("%s %v cid=%s channel=%s pod=%s/%s container=%s cr=%s/%s",
+		prefix, event, w.clientCID(), w.ChannelID, w.PodNS, w.PodName, w.Container, w.CRNamespace, w.CRName)
 }
 
 func NewWatcher(c *multicast.Client) *watcher {
@@ -61,7 +77,7 @@ func (w *watcher) WriteMsg(msg string) error {
 	}
 
 	sendEvent := func(event *jfsnotify.Event) error {
-		klog.Info("translate msg to watcher, ", event)
+		w.logTarget("translate msg to watcher,", event)
 		data, err := w.translateEventNameInCluster(event)
 		if err != nil {
 			return err
@@ -72,7 +88,7 @@ func (w *watcher) WriteMsg(msg string) error {
 			return nil
 		}
 
-		klog.Info("send msg to watcher, ", event)
+		w.logTarget("send msg to watcher,", event)
 		err = w.client.SendBytes(data)
 		if err != nil {
 			return err
