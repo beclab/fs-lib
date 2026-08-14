@@ -103,20 +103,26 @@ func (w *watcher) WriteMsg(msg string) error {
 }
 
 func (w *watcher) send(localEvent jfsnotify.Event, sendEvent func(e *jfsnotify.Event) error) {
+	// Freeze the node-path key used in delayWriteMsgs. sendEvent translates
+	// Event.Name in place to the pod path; deleting with the mutated name
+	// would leave the map entry orphaned (later WRITEs only refresh, never send).
+	mapKey := localEvent.Name
+
 	deley := time.NewTimer(time.Second)
 	go func() {
 		<-deley.C
-		if t, ok := w.delayWriteMsgs[localEvent.Name]; ok && time.Since(t) < time.Second {
+		if t, ok := w.delayWriteMsgs[mapKey]; ok && time.Since(t) < time.Second {
 			w.send(localEvent, sendEvent)
 			return
 		}
-		err := sendEvent(&localEvent)
+		ev := localEvent // copy; translate/send must not mutate mapKey
+		err := sendEvent(&ev)
 		if err != nil {
-			klog.Error("send write event error, ", err, ", ", localEvent.Name)
+			klog.Error("send write event error, ", err, ", ", mapKey)
 		}
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		delete(w.delayWriteMsgs, localEvent.Name)
+		delete(w.delayWriteMsgs, mapKey)
 	}()
 
 }
