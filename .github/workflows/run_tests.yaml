@@ -1,0 +1,32 @@
+name: Test
+on:
+  pull_request:
+  push:
+    branches:
+      - "main"
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.4'
+      - name: Unit and socket integration tests
+        run: make test
+      - name: Redis-backed integration tests
+        # The service container is already healthy, so this skips the docker
+        # start/stop that make test-integration does locally.
+        env:
+          REDIS_ADDR: 127.0.0.1:6379
+        run: go test ./k8s/... -tags integration -race -count=1
