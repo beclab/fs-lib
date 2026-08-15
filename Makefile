@@ -21,7 +21,12 @@ test: ;$(info $(M)...Run unit and socket integration tests.) @
 	go test ./k8s/... -race -count=1
 
 test-integration: ;$(info $(M)...Run redis-backed integration tests.) @
+	@docker rm -f fs-lib-redis >/dev/null 2>&1 || true
 	docker run --rm -d -p $(REDIS_PORT):6379 --name fs-lib-redis redis:7-alpine
+	@for i in $$(seq 1 50); do \
+		docker exec fs-lib-redis redis-cli ping >/dev/null 2>&1 && break; \
+		sleep 0.2; \
+	done
 	@REDIS_ADDR=127.0.0.1:$(REDIS_PORT) go test ./k8s/... -tags integration -race -count=1; \
 		status=$$?; docker rm -f fs-lib-redis >/dev/null; exit $$status
 

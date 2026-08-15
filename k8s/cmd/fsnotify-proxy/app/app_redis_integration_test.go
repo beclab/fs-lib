@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -84,17 +85,34 @@ func TestRedisE2E_PublishReachesWatcher(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The subscription races with our publish, so retry until it lands.
+	// The subscription races with our publish, so retry until it lands. The
+	// publisher owns no *testing.T: it must not outlive the test body.
 	deliver := time.NewTicker(200 * time.Millisecond)
 	defer deliver.Stop()
+
+	stopPub := make(chan struct{})
+	pubErr := make(chan error, 1)
+	var pubWG sync.WaitGroup
+	pubWG.Add(1)
+	defer func() {
+		close(stopPub)
+		pubWG.Wait()
+		select {
+		case err := <-pubErr:
+			t.Errorf("publish: %v", err)
+		default:
+		}
+	}()
+
 	go func() {
+		defer pubWG.Done()
 		for {
 			if err := pub.Pub(producer.ChannelName, string(payload)); err != nil {
-				t.Errorf("publish: %v", err)
+				pubErr <- err
 				return
 			}
 			select {
-			case <-ctx.Done():
+			case <-stopPub:
 				return
 			case <-deliver.C:
 			}
