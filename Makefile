@@ -1,6 +1,9 @@
 
 
-.PHONY: fsnotify-daemon fsnotify-proxy fmt vet
+.PHONY: fsnotify-daemon fsnotify-proxy fmt vet test test-integration
+
+# Host port for the throwaway redis used by test-integration.
+REDIS_PORT ?= 16379
 
 all: fsnotify-daemon fsnotify-proxy
 
@@ -12,6 +15,15 @@ fmt: ;$(info $(M)...Begin to run go fmt against code.) @
 
 vet: ;$(info $(M)...Begin to run go vet against code.) @
 	go vet ./...
+
+# Scoped to ./k8s/... because the jfsnotify tests depend on prebuilt /data fixtures.
+test: ;$(info $(M)...Run unit and socket integration tests.) @
+	go test ./k8s/... -race -count=1
+
+test-integration: ;$(info $(M)...Run redis-backed integration tests.) @
+	docker run --rm -d -p $(REDIS_PORT):6379 --name fs-lib-redis redis:7-alpine
+	@REDIS_ADDR=127.0.0.1:$(REDIS_PORT) go test ./k8s/... -tags integration -race -count=1; \
+		status=$$?; docker rm -f fs-lib-redis >/dev/null; exit $$status
 
 fsnotify-daemon: fmt vet ;$(info $(M)...Begin to build fsnotify-daemon.) @
 	go build -o output/fsnotify-daemon ./k8s/cmd/fsnotify-daemon/main.go

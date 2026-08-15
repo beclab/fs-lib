@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -171,6 +172,134 @@ func TestWriteDebounce_CloseCancelsPending(t *testing.T) {
 	w.mu.RUnlock()
 	if pending != 0 {
 		t.Fatalf("delayedWrites should be cleared on Close, got %d", pending)
+	}
+}
+
+func TestWriteMsg_BatchSendsEveryNonWriteEvent(t *testing.T) {
+	old := writeDebounce
+	writeDebounce = testDebounce
+	defer func() { writeDebounce = old }()
+
+	cap := &sendCapture{}
+	w := NewWatcher(nil)
+	w.testSendEvent = cap.hook()
+
+	key := "/node/docs"
+	batch, err := json.Marshal([]*jfsnotify.Event{
+		{Name: "/node/docs/a.txt", Key: key, Op: jfsnotify.Chmod},
+		{Name: "/node/docs/b.txt", Key: key, Op: jfsnotify.Write},
+		{Name: "/node/docs/c.txt", Key: key, Op: jfsnotify.Remove},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.WriteMsg(string(batch)); err != nil {
+		t.Fatal(err)
+	}
+
+	got := cap.snapshot()
+	if len(got) != 2 {
+		t.Fatalf("both non-WRITE events should send immediately, got %d: %+v", len(got), got)
+	}
+	if got[0].Name != "/node/docs/a.txt" || got[1].Name != "/node/docs/c.txt" {
+		t.Fatalf("unexpected immediate events: %+v", got)
+	}
+
+	waitUntil(t, 300*time.Millisecond, func() bool { return cap.len() == 3 })
+	if last := cap.snapshot()[2]; last.Name != "/node/docs/b.txt" || last.Op != jfsnotify.Write {
+		t.Fatalf("want debounced WRITE for b.txt, got %+v", last)
+	}
+}
+
+func TestWriteMsg_BatchStopsAtFirstSendError(t *testing.T) {
+	old := writeDebounce
+	writeDebounce = testDebounce
+	defer func() { writeDebounce = old }()
+
+	sendErr := errors.New("client gone")
+	var sent []string
+	w := NewWatcher(nil)
+	w.testSendEvent = func(event *jfsnotify.Event) error {
+		sent = append(sent, event.Name)
+		if event.Name == "/node/docs/b.txt" {
+			return sendErr
+		}
+		return nil
+	}
+
+	key := "/node/docs"
+	batch, err := json.Marshal([]*jfsnotify.Event{
+		{Name: "/node/docs/a.txt", Key: key, Op: jfsnotify.Chmod},
+		{Name: "/node/docs/b.txt", Key: key, Op: jfsnotify.Remove},
+		{Name: "/node/docs/c.txt", Key: key, Op: jfsnotify.Chmod},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.WriteMsg(string(batch)); !errors.Is(err, sendErr) {
+		t.Fatalf("want the send error propagated, got %v", err)
+	}
+	if len(sent) != 2 {
+		t.Fatalf("batch should stop at the failed send, got %v", sent)
+	}
+}
+
+func TestWriteMsg_ClosedWatcherDropsNonWriteEvents(t *testing.T) {
+	old := writeDebounce
+	writeDebounce = testDebounce
+	defer func() { writeDebounce = old }()
+
+	cap := &sendCapture{}
+	w := NewWatcher(nil)
+	w.testSendEvent = cap.hook()
+
+	w.Close()
+
+	if err := w.WriteMsg(eventJSON(t, "/node/docs/a.txt", "/node/docs", jfsnotify.Chmod)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteMsg(eventJSON(t, "/node/docs/b.txt", "/node/docs", jfsnotify.Remove)); err != nil {
+		t.Fatal(err)
+	}
+
+	if cap.len() != 0 {
+		t.Fatalf("closed watcher must not send, got %d: %+v", cap.len(), cap.snapshot())
+	}
+}
+
+func TestClose_IdempotentAndRejectsLaterWrites(t *testing.T) {
+	old := writeDebounce
+	writeDebounce = testDebounce
+	defer func() { writeDebounce = old }()
+
+	cap := &sendCapture{}
+	w := NewWatcher(nil)
+	w.testSendEvent = cap.hook()
+	removes := 0
+	w.Remove = func() { removes++ }
+
+	w.Close()
+	w.Close()
+	if removes != 1 {
+		t.Fatalf("Remove should run once across repeated Close, got %d", removes)
+	}
+
+	if err := w.WriteMsg(eventJSON(t, "/node/docs/ok7.txt", "/node/docs", jfsnotify.Write)); err != nil {
+		t.Fatal(err)
+	}
+
+	w.mu.RLock()
+	pending := len(w.delayedWrites)
+	w.mu.RUnlock()
+	if pending != 0 {
+		t.Fatalf("WRITE after Close must not arm a timer, got %d pending", pending)
+	}
+
+	time.Sleep(3 * testDebounce)
+	if cap.len() != 0 {
+		t.Fatalf("WRITE after Close must not send, got %d: %+v", cap.len(), cap.snapshot())
 	}
 }
 
