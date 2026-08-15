@@ -102,8 +102,8 @@ func (w *watcher) WriteMsg(msg string) error {
 		case jfsnotify.Write:
 			w.armWriteDebounce(*event, sendEvent)
 		default:
-			// A failed send has already torn the client down, so the rest of the
-			// batch has nowhere to go.
+			// SendBytes only fails when the client is closed or being dropped, so
+			// the rest of the batch has nowhere to go.
 			if err := sendEvent(event); err != nil {
 				return err
 			}

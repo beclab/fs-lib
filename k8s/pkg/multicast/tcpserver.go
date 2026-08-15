@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/smallnest/goframe"
 	"k8s.io/klog/v2"
@@ -17,6 +18,11 @@ import (
 
 // sendQueueDepth mirrors the client-side sendQ in jfsnotify.
 const sendQueueDepth = 255
+
+const (
+	minAcceptBackoff = 10 * time.Millisecond
+	maxAcceptBackoff = time.Second
+)
 
 var (
 	ErrClientClosed = errors.New("client connection closed")
@@ -94,7 +100,8 @@ func (c *Client) listen() {
 	}
 }
 
-// writeLoop is the only writer of this connection.
+// writeLoop is the only writer of this connection. Frames still queued when the
+// connection goes down are dropped: the peer reconnects and replays its watches.
 func (c *Client) writeLoop() {
 	for {
 		select {
@@ -119,8 +126,13 @@ func (c *Client) shutdown(err error) {
 	})
 }
 
-// Send bytes to client. The frame is queued for writeLoop rather than written
-// inline, so a stalled peer cannot block the shared fan-out.
+// SendBytes queues one frame for writeLoop rather than writing it inline, so a
+// stalled peer cannot block the shared fan-out.
+//
+// Two consequences for callers: b is retained until the frame reaches the wire,
+// so it must not be reused; and a nil return only means the frame was queued.
+// Write failures surface on writeLoop, which tears the connection down, so the
+// only errors reported here are ErrClientClosed and ErrSlowConsumer.
 func (c *Client) SendBytes(b []byte) error {
 	select {
 	case <-c.done:
@@ -184,20 +196,36 @@ func (s *server) Listen(ctx context.Context) {
 	}
 	defer listener.Close()
 
+	// Accept blocks, so cancellation has to come through the listener.
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+	}()
+
+	backoff := minAcceptBackoff
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			conn, err := listener.Accept()
-			if err != nil {
-				// A nil conn would panic both the read loop and writeLoop.
-				klog.Error("accept connection error, ", err)
-				continue
+		conn, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
 			}
 
-			go newClient(conn, s).listen()
+			// Errors like EMFILE persist for as long as the process is out of
+			// descriptors; retrying flat out would just burn a core.
+			klog.Error("accept connection error, retry in ", backoff, ", ", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff *= 2; backoff > maxAcceptBackoff {
+				backoff = maxAcceptBackoff
+			}
+			continue
 		}
+
+		backoff = minAcceptBackoff
+		go newClient(conn, s).listen()
 	}
 }
 
