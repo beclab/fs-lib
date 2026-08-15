@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"bytetrade.io/web3os/fs-lib/jfsnotify"
 	"bytetrade.io/web3os/fs-lib/k8s/pkg/apis/sys/v1alpha1"
@@ -20,6 +21,10 @@ import (
 )
 
 const MaxName = 255
+
+// crDeleteTimeout bounds the watcher CR deletion so a stuck API server cannot
+// keep the teardown goroutine around for the lifetime of the process.
+const crDeleteTimeout = 30 * time.Second
 
 type App struct {
 	proxyServer  *multicast.Server
@@ -45,10 +50,17 @@ func newApp(ctx context.Context, proxyServer *multicast.Server, clientSet syscli
 	app.proxyServer.InitClient = func(c *multicast.Client) {
 		w := NewWatcher(c)
 		w.Remove = func() {
-			err := clientSet.SysV1alpha1().FSWatchers(w.CRNamespace).Delete(ctx, w.CRName, metav1.DeleteOptions{})
-			if err != nil {
-				klog.Error("delete cr error, ", w.CRNamespace, " / ", w.CRName, ", ", err)
-			}
+			namespace, name := w.CRNamespace, w.CRName
+			// Teardown can be reached from the fan-out goroutine when a client is
+			// dropped, so the API round trip must not run there.
+			go func() {
+				deleteCtx, cancel := context.WithTimeout(ctx, crDeleteTimeout)
+				defer cancel()
+
+				if err := clientSet.SysV1alpha1().FSWatchers(namespace).Delete(deleteCtx, name, metav1.DeleteOptions{}); err != nil {
+					klog.Error("delete cr error, ", namespace, " / ", name, ", ", err)
+				}
+			}()
 		}
 		c.Helper = w
 	}
