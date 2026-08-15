@@ -23,14 +23,18 @@ const MaxName = 255
 
 type App struct {
 	proxyServer  *multicast.Server
-	clientSet    *sysclientset.Clientset
-	k8sClientSet *kubernetes.Clientset
+	clientSet    sysclientset.Interface
+	k8sClientSet kubernetes.Interface
 	ctx          context.Context
 }
 
-func New(ctx context.Context, stopCh <-chan struct{}, clientSet *sysclientset.Clientset, k8sClient *kubernetes.Clientset, addr string) *App {
+func New(ctx context.Context, stopCh <-chan struct{}, clientSet sysclientset.Interface, k8sClient kubernetes.Interface, addr string) *App {
+	return newApp(ctx, multicast.New(ctx, stopCh, addr), clientSet, k8sClient)
+}
+
+func newApp(ctx context.Context, proxyServer *multicast.Server, clientSet sysclientset.Interface, k8sClient kubernetes.Interface) *App {
 	app := &App{
-		proxyServer:  multicast.New(ctx, stopCh, addr),
+		proxyServer:  proxyServer,
 		clientSet:    clientSet,
 		k8sClientSet: k8sClient,
 		ctx:          ctx,
@@ -254,12 +258,4 @@ func (a *App) getWatcher(channel string) (string, *v1alpha1.FSWatcher, error) {
 	w, err := a.clientSet.SysV1alpha1().FSWatchers(namespace).Get(a.ctx, watcherName, metav1.GetOptions{})
 
 	return watcherName, w, err
-}
-
-func min(x, y int) int {
-	if x > y {
-		return y
-	}
-
-	return x
 }
