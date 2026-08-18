@@ -71,12 +71,18 @@ func startServer(t *testing.T) (*Server, string) {
 
 	go s.Start()
 
-	// Wait for the listener to come up.
+	// Wait for the listener to come up. A successful Dial also Accepts a real
+	// Client into watchClients; that probe must be gone before callers wait on
+	// clientCount()==N, otherwise probe+(N-1) peers can satisfy the wait and
+	// the Nth peer misses early Deliver frames (CI flake under -race).
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		conn, err := net.Dial("tcp", addr)
 		if err == nil {
 			conn.Close()
+			waitFor(t, "probe client to leave", func() bool {
+				return s.clientCount() == 0
+			})
 			return s, addr
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -127,7 +133,28 @@ func TestIntegration_FanOutReachesEveryClient(t *testing.T) {
 	for i := 0; i < peers; i++ {
 		conns = append(conns, dialPeer(t, addr))
 	}
-	waitFor(t, "clients to register", func() bool { return s.clientCount() == peers })
+	// Match by remote addr, not only by count: a leftover readiness-probe
+	// client can make count==peers while one real peer is still missing.
+	waitFor(t, "peers to register", func() bool {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		if len(s.watchClients) != peers {
+			return false
+		}
+		for _, p := range conns {
+			found := false
+			for _, c := range s.watchClients {
+				if c.conn.RemoteAddr().String() == p.conn.LocalAddr().String() {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	})
 
 	// Every registered client must be fully initialized before it is reachable.
 	s.mu.RLock()
