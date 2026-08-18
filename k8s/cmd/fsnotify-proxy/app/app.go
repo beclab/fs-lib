@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"bytetrade.io/web3os/fs-lib/jfsnotify"
 	"bytetrade.io/web3os/fs-lib/k8s/pkg/apis/sys/v1alpha1"
@@ -21,16 +22,24 @@ import (
 
 const MaxName = 255
 
+// crDeleteTimeout bounds the watcher CR deletion so a stuck API server cannot
+// keep the teardown goroutine around for the lifetime of the process.
+const crDeleteTimeout = 30 * time.Second
+
 type App struct {
 	proxyServer  *multicast.Server
-	clientSet    *sysclientset.Clientset
-	k8sClientSet *kubernetes.Clientset
+	clientSet    sysclientset.Interface
+	k8sClientSet kubernetes.Interface
 	ctx          context.Context
 }
 
-func New(ctx context.Context, stopCh <-chan struct{}, clientSet *sysclientset.Clientset, k8sClient *kubernetes.Clientset, addr string) *App {
+func New(ctx context.Context, stopCh <-chan struct{}, clientSet sysclientset.Interface, k8sClient kubernetes.Interface, addr string) *App {
+	return newApp(ctx, multicast.New(ctx, stopCh, addr), clientSet, k8sClient)
+}
+
+func newApp(ctx context.Context, proxyServer *multicast.Server, clientSet sysclientset.Interface, k8sClient kubernetes.Interface) *App {
 	app := &App{
-		proxyServer:  multicast.New(ctx, stopCh, addr),
+		proxyServer:  proxyServer,
 		clientSet:    clientSet,
 		k8sClientSet: k8sClient,
 		ctx:          ctx,
@@ -41,10 +50,17 @@ func New(ctx context.Context, stopCh <-chan struct{}, clientSet *sysclientset.Cl
 	app.proxyServer.InitClient = func(c *multicast.Client) {
 		w := NewWatcher(c)
 		w.Remove = func() {
-			err := clientSet.SysV1alpha1().FSWatchers(w.CRNamespace).Delete(ctx, w.CRName, metav1.DeleteOptions{})
-			if err != nil {
-				klog.Error("delete cr error, ", w.CRNamespace, " / ", w.CRName, ", ", err)
-			}
+			namespace, name := w.CRNamespace, w.CRName
+			// Teardown can be reached from the fan-out goroutine when a client is
+			// dropped, so the API round trip must not run there.
+			go func() {
+				deleteCtx, cancel := context.WithTimeout(ctx, crDeleteTimeout)
+				defer cancel()
+
+				if err := clientSet.SysV1alpha1().FSWatchers(namespace).Delete(deleteCtx, name, metav1.DeleteOptions{}); err != nil {
+					klog.Error("delete cr error, ", namespace, " / ", name, ", ", err)
+				}
+			}()
 		}
 		c.Helper = w
 	}
@@ -254,12 +270,4 @@ func (a *App) getWatcher(channel string) (string, *v1alpha1.FSWatcher, error) {
 	w, err := a.clientSet.SysV1alpha1().FSWatchers(namespace).Get(a.ctx, watcherName, metav1.GetOptions{})
 
 	return watcherName, w, err
-}
-
-func min(x, y int) int {
-	if x > y {
-		return y
-	}
-
-	return x
 }

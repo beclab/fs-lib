@@ -23,7 +23,22 @@ type Server struct {
 	ctx                context.Context
 }
 
+// New builds a Server whose fan-out is fed by the redis subscription.
 func New(ctx context.Context, stopCh <-chan struct{}, addr string) *Server {
+	s := NewWithoutSubscriber(ctx, addr)
+
+	sub, err := NewSubscriber(ctx, stopCh, s.Deliver)
+	if err != nil {
+		panic(err)
+	}
+	s.subscriber = sub
+
+	return s
+}
+
+// NewWithoutSubscriber builds a Server with no event source attached. The caller
+// drives fan-out through Deliver, which is all the redis subscription does.
+func NewWithoutSubscriber(ctx context.Context, addr string) *Server {
 	tcpServer := NewTCP(addr)
 
 	s := &Server{
@@ -32,23 +47,20 @@ func New(ctx context.Context, stopCh <-chan struct{}, addr string) *Server {
 		ctx:          ctx,
 	}
 
-	sub, err := NewSubscriber(ctx, stopCh, s.multicastMsg)
-	if err != nil {
-		panic(err)
-	}
-
-	s.subscriber = sub
 	tcpServer.onNewMessage = s.messageReceived
 	tcpServer.onClientConnectionClosed = s.removeChannel
 	tcpServer.onNewClientCallback = func(c *Client) {
-		s.mu.Lock()
 		c.cid = string(uuid.NewUUID())
-		s.watchClients[c.cid] = c
-		s.mu.Unlock()
 
 		if s.InitClient != nil {
 			s.InitClient(c)
 		}
+
+		// Published last: a fan-out picking this client up before Helper is set
+		// would silently skip it.
+		s.mu.Lock()
+		s.watchClients[c.cid] = c
+		s.mu.Unlock()
 	}
 
 	return s
@@ -84,7 +96,8 @@ func (s *Server) removeChannel(c *Client, err error) {
 	delete(s.watchClients, c.cid)
 }
 
-func (s *Server) multicastMsg(msg string) {
+// Deliver fans one payload out to every connected client.
+func (s *Server) Deliver(msg string) {
 	var funcs []func()
 	s.mu.RLock()
 	n := len(s.watchClients)

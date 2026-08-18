@@ -6,20 +6,52 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"log"
 	"net"
+	"sync"
+	"time"
 
 	"github.com/smallnest/goframe"
 	"k8s.io/klog/v2"
 )
 
-// Client holds info about connection
+// sendQueueDepth mirrors the client-side sendQ in jfsnotify.
+const sendQueueDepth = 255
+
+const (
+	minAcceptBackoff = 10 * time.Millisecond
+	maxAcceptBackoff = time.Second
+)
+
+var (
+	ErrClientClosed = errors.New("client connection closed")
+	ErrSlowConsumer = errors.New("client send queue full")
+)
+
+// Client holds info about connection.
+//
+// Frames are written by writeLoop only. WriteFrame emits the length header and
+// the payload as separate writes on a shared bufio.Writer, so a single owner is
+// what keeps two senders from interleaving halves of two frames.
 type Client struct {
-	cid    string
-	conn   net.Conn
-	Server *server
-	fconn  goframe.FrameConn
-	Helper any
+	cid       string
+	conn      net.Conn
+	Server    *server
+	fconn     goframe.FrameConn
+	sendQ     chan []byte
+	done      chan struct{}
+	closeOnce sync.Once
+	Helper    any
+}
+
+func newClient(conn net.Conn, s *server) *Client {
+	return &Client{
+		conn:   conn,
+		Server: s,
+		sendQ:  make(chan []byte, sendQueueDepth),
+		done:   make(chan struct{}),
+	}
 }
 
 // TCP server
@@ -33,8 +65,6 @@ type server struct {
 
 // Read client data from channel
 func (c *Client) listen() {
-	c.Server.onNewClientCallback(c)
-
 	encoderConfig := goframe.EncoderConfig{
 		ByteOrder:                       binary.BigEndian,
 		LengthFieldLength:               4,
@@ -50,13 +80,19 @@ func (c *Client) listen() {
 		InitialBytesToStrip: 4,
 	}
 
+	// fconn must be ready before the callback publishes this client to the
+	// fan-out map, otherwise senders race with this assignment.
 	c.fconn = goframe.NewLengthFieldBasedFrameConn(encoderConfig, decoderConfig, c.conn)
+
+	go c.writeLoop()
+
+	c.Server.onNewClientCallback(c)
+
 	for {
 		klog.Info("start to read client")
 		message, err := c.fconn.ReadFrame()
 		if err != nil {
-			c.conn.Close()
-			c.Server.onClientConnectionClosed(c, err)
+			c.shutdown(err)
 			return
 		}
 		klog.Info("start to process new message")
@@ -64,24 +100,58 @@ func (c *Client) listen() {
 	}
 }
 
-// Send text message to client
-func (c *Client) Send(message string) error {
-	return c.SendBytes([]byte(message))
-}
-
-// Send bytes to client
-func (c *Client) SendBytes(b []byte) error {
-
-	err := c.fconn.WriteFrame(b)
-	if err != nil {
-		c.fconn.Close()
-		c.Server.onClientConnectionClosed(c, err)
+// writeLoop is the only writer of this connection. Frames still queued when the
+// connection goes down are dropped: the peer reconnects and replays its watches.
+func (c *Client) writeLoop() {
+	for {
+		select {
+		case <-c.done:
+			return
+		case b := <-c.sendQ:
+			if err := c.fconn.WriteFrame(b); err != nil {
+				c.shutdown(err)
+				return
+			}
+		}
 	}
-	return err
 }
 
-func (c *Client) Conn() net.Conn {
-	return c.conn
+// shutdown tears the connection down exactly once. Closing conn also unblocks a
+// WriteFrame parked in the kernel, so callers never wait for the writer.
+func (c *Client) shutdown(err error) {
+	c.closeOnce.Do(func() {
+		close(c.done)
+		c.conn.Close()
+		c.Server.onClientConnectionClosed(c, err)
+	})
+}
+
+// SendBytes queues one frame for writeLoop rather than writing it inline, so a
+// stalled peer cannot block the shared fan-out.
+//
+// Two consequences for callers: b is retained until the frame reaches the wire,
+// so it must not be reused; and a nil return only means the frame was queued.
+// Write failures surface on writeLoop, which tears the connection down, so the
+// only errors reported here are ErrClientClosed and ErrSlowConsumer.
+func (c *Client) SendBytes(b []byte) error {
+	select {
+	case <-c.done:
+		return ErrClientClosed
+	default:
+	}
+
+	select {
+	case c.sendQ <- b:
+		return nil
+	case <-c.done:
+		return ErrClientClosed
+	default:
+		// A peer this far behind will not catch up; drop it and let it reconnect
+		// and re-send its watches instead of stalling every other client.
+		klog.Error("send queue full, dropping client, cid=", c.cid)
+		c.shutdown(ErrSlowConsumer)
+		return ErrSlowConsumer
+	}
 }
 
 // CID returns the server-assigned connection id for this client.
@@ -93,7 +163,8 @@ func (c *Client) CID() string {
 }
 
 func (c *Client) Close() error {
-	return c.fconn.Close()
+	c.shutdown(nil)
+	return nil
 }
 
 // Called right after server starts listening new client
@@ -125,18 +196,36 @@ func (s *server) Listen(ctx context.Context) {
 	}
 	defer listener.Close()
 
+	// Accept blocks, so cancellation has to come through the listener.
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+	}()
+
+	backoff := minAcceptBackoff
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			conn, _ := listener.Accept()
-			client := &Client{
-				conn:   conn,
-				Server: s,
+		conn, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+				return
 			}
-			go client.listen()
+
+			// Errors like EMFILE persist for as long as the process is out of
+			// descriptors; retrying flat out would just burn a core.
+			klog.Error("accept connection error, retry in ", backoff, ", ", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			if backoff *= 2; backoff > maxAcceptBackoff {
+				backoff = maxAcceptBackoff
+			}
+			continue
 		}
+
+		backoff = minAcceptBackoff
+		go newClient(conn, s).listen()
 	}
 }
 

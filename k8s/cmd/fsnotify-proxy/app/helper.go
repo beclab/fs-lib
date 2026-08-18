@@ -14,30 +14,6 @@ import (
 // writeDebounce is the quiet period before flushing a WRITE. Tests may shorten it.
 var writeDebounce = time.Second
 
-type DebugRWMutex struct {
-	mu sync.RWMutex
-}
-
-func (d *DebugRWMutex) Lock() {
-	klog.Info("Mutex Lock")
-	d.mu.Lock()
-}
-
-func (d *DebugRWMutex) Unlock() {
-	klog.Info("Mutex Unlock")
-	d.mu.Unlock()
-}
-
-func (d *DebugRWMutex) RLock() {
-	klog.Info("Mutex RLock")
-	d.mu.RLock()
-}
-
-func (d *DebugRWMutex) RUnlock() {
-	klog.Info("Mutex RUnlock")
-	d.mu.RUnlock()
-}
-
 // delayedWrite holds a resettable debounce timer and the latest WRITE snapshot.
 type delayedWrite struct {
 	timer *time.Timer
@@ -46,18 +22,18 @@ type delayedWrite struct {
 }
 
 type watcher struct {
-	multicast.MsgWriter
-	client         *multicast.Client
-	podPathMap     map[string]string // { pathInNode: pathInPod }
-	mu             sync.RWMutex
-	Remove         func()
-	CRName         string
-	CRNamespace    string
-	ChannelID      string // "ns/pod/container"
-	PodNS          string
-	PodName        string
-	Container      string
-	delayedWrites  map[string]*delayedWrite
+	client        *multicast.Client
+	podPathMap    map[string]string // { pathInNode: pathInPod }
+	mu            sync.RWMutex
+	Remove        func()
+	CRName        string
+	CRNamespace   string
+	ChannelID     string // "ns/pod/container"
+	PodNS         string
+	PodName       string
+	Container     string
+	delayedWrites map[string]*delayedWrite
+	closed        bool
 	// testSendEvent, when set, replaces translate/SendBytes (unit tests only).
 	testSendEvent func(*jfsnotify.Event) error
 }
@@ -83,6 +59,13 @@ func NewWatcher(c *multicast.Client) *watcher {
 }
 
 func (w *watcher) WriteMsg(msg string) error {
+	w.mu.RLock()
+	closed := w.closed
+	w.mu.RUnlock()
+	if closed {
+		return nil
+	}
+
 	events, err := w.parseMsg(msg)
 	if err != nil {
 		return err
@@ -119,7 +102,11 @@ func (w *watcher) WriteMsg(msg string) error {
 		case jfsnotify.Write:
 			w.armWriteDebounce(*event, sendEvent)
 		default:
-			return sendEvent(event)
+			// SendBytes only fails when the client is closed or being dropped, so
+			// the rest of the batch has nowhere to go.
+			if err := sendEvent(event); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -130,6 +117,10 @@ func (w *watcher) WriteMsg(msg string) error {
 func (w *watcher) armWriteDebounce(event jfsnotify.Event, sendEvent func(*jfsnotify.Event) error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
+	if w.closed {
+		return
+	}
 
 	name := event.Name
 	d, exists := w.delayedWrites[name]
@@ -158,7 +149,7 @@ func (w *watcher) armWriteDebounce(event jfsnotify.Event, sendEvent func(*jfsnot
 func (w *watcher) flushWriteDebounce(name string, gen uint64, sendEvent func(*jfsnotify.Event) error) {
 	w.mu.Lock()
 	d, ok := w.delayedWrites[name]
-	if !ok || d.gen != gen {
+	if !ok || d.gen != gen || w.closed {
 		w.mu.Unlock()
 		return
 	}
@@ -167,6 +158,7 @@ func (w *watcher) flushWriteDebounce(name string, gen uint64, sendEvent func(*jf
 	w.mu.Unlock()
 
 	klog.Infof("debounce_flush cid=%s channel=%s name=%s", w.clientCID(), w.ChannelID, name)
+	// Sent outside w.mu: a send failure unwinds into Close, which takes w.mu.
 	if err := sendEvent(&ev); err != nil {
 		klog.Error("send write event error, ", err, ", ", name)
 	}
@@ -174,6 +166,11 @@ func (w *watcher) flushWriteDebounce(name string, gen uint64, sendEvent func(*jf
 
 func (w *watcher) Close() {
 	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return
+	}
+	w.closed = true
 	n := len(w.delayedWrites)
 	for name, d := range w.delayedWrites {
 		if d != nil && d.timer != nil {
